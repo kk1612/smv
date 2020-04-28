@@ -4,6 +4,14 @@
 #define ASSERT_H_DEFINED
 
 #ifdef _DEBUG
+#define ASSERT_DEBUG
+#endif
+#ifdef pp_MEMDEBUG
+#undef ASSERT_DEBUG
+#define ASSERT_DEBUG
+#endif
+
+#ifdef ASSERT_DEBUG
 
 #ifdef CPP
 #define ASSERT_EXTERN extern "C"
@@ -13,7 +21,7 @@
 
 ASSERT_EXTERN void _Assert(char *file, unsigned linenumber);
 ASSERT_EXTERN void _WAssert(char *comment, char *file, unsigned linenumber);
-#define ASSERT(f) if(f){}else{_Assert(__FILE__,__LINE__);}
+#define ASSERT(f) if((f)){}else{_Assert(__FILE__,__LINE__);}
 #else
   #define ASSERT(f)
 #endif

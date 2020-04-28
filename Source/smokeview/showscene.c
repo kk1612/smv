@@ -10,67 +10,91 @@
 #include "update.h"
 #include "smokeviewvars.h"
 #include "viewports.h"
-#include "IOobject.h"
+#include "IOobjects.h"
+
+/* ----------------------- DrawLights ----------------------------- */
+
+void DrawLights(float *position0, float *position1){
+  float xyz0[3];
+
+  xyz0[0] = (    xbar0ORIG + xbarORIG)/2.0;
+  xyz0[1] = (    ybar0ORIG + ybarORIG)/2.0;
+  xyz0[2] = (3.0*zbar0ORIG + zbarORIG)/4.0;
+
+  glPushMatrix();
+  glScalef(SCALE2SMV(1.0), SCALE2SMV(1.0), SCALE2SMV(1.0));
+  glTranslatef(-xbar0, -ybar0, -zbar0);
+  glLineWidth(10.0);
+  glBegin(GL_LINES);
+  glColor3f(0.0, 0.0, 0.0);
+  if(use_light0==1){
+    float xyz1[3];
+
+    glVertex3fv(xyz0);
+    xyz1[0] = xyz0[0]+position0[0];
+    xyz1[1] = xyz0[1]+position0[1];
+    xyz1[2] = xyz0[2]+position0[2];
+    glVertex3fv(xyz1);
+  }
+
+  if(use_light1==1){
+    float xyz1[3];
+
+    glVertex3fv(xyz0);
+    xyz1[0] = xyz0[0]+position1[0];
+    xyz1[1] = xyz0[1]+position1[1];
+    xyz1[2] = xyz0[2]+position1[2];
+    glVertex3fv(xyz1);
+  }
+  glEnd();
+  glPopMatrix();
+}
 
 /* ------------------ ShowScene2 ------------------------ */
 
 void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
   if(rotation_type == EYE_CENTERED&&nskyboxinfo>0)DrawSkybox();
+  UpdateLights(light_position0, light_position1);
+  if(drawlights==1)DrawLights(light_position0, light_position1);
 
-  if(UpdateLIGHTS == 1)UpdateLights(light_position0, light_position1);
+
+ // if(render_status==RENDER_ON&&render_mode==RENDER_360){
+ //   UpdateLights(light_position0, light_position1);
+ // }
 
   if(mode == DRAWSCENE){
     glPointSize((float)1.0);
 
 
-    /* ++++++++++++++++++++++++ draw north  +++++++++++++++++++++++++ */
+    /* ++++++++++++++++++++++++ DrawNorth  +++++++++++++++++++++++++ */
 
     if(vis_northangle == 1){
       CLIP_GEOMETRY;
-      drawnorth();
-      SNIFF_ERRORS("after drawnorth");
+      DrawNorth();
+      SNIFF_ERRORS("after DrawNorth");
     }
 
-    /* ++++++++++++++++++++++++ draw trees +++++++++++++++++++++++++ */
+    /* ++++++++++++++++++++++++ DrawTrees +++++++++++++++++++++++++ */
 
     if(ntreeinfo>0){
       CLIP_GEOMETRY;
-      drawtrees();
-      SNIFF_ERRORS("after drawtrees");
+      DrawTrees();
+      SNIFF_ERRORS("after DrawTrees");
     }
 
     /* ++++++++++++++++++++++++ draw particles +++++++++++++++++++++++++ */
 
     if(showsmoke == 1){
       CLIP_VALS;
-      draw_partframe();
+      DrawPartFrame();
     }
 
     /* ++++++++++++++++++++++++ draw evacuation +++++++++++++++++++++++++ */
 
     if(showevac == 1){
       CLIP_VALS;
-      draw_evacframe();
+      DrawEvacFrame();
     }
-
-    /* ++++++++++++++++++++++++ draw test geometry +++++++++++++++++++++++++ */
-
-#ifdef pp_GEOMTEST
-    if(geomtest_option == TETRAHEDRON_TEST){
-      CLIP_GEOMETRY;
-      draw_test_clip();
-      draw_test_outline();
-    }
-    if(show_cutcells == 1)draw_geom_cutcells();
-    if(geomtest_option == TRIANGLE_TEST){
-      CLIP_GEOMETRY;
-      draw_test_triangle();
-    }
-    if(geomtest_option == POLYGON_TEST){
-      CLIP_GEOMETRY;
-      draw_test_polygon();
-    }
-#endif
 
     /* ++++++++++++++++++++++++ draw screeninfo +++++++++++++++++++++++++ */
 
@@ -80,7 +104,7 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
     /* ++++++++++++++++++++++++ draw circular vents +++++++++++++++++++++++++ */
 
-    if(ncvents>0 && visCircularVents != VENT_HIDE){
+    if(ncvents>0 && visCircularVents != VENT_HIDE && showpatch==0){
       CLIP_GEOMETRY;
       DrawCircVents(visCircularVents);
     }
@@ -88,9 +112,9 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
     /* ++++++++++++++++++++++++ draw sensors/sprinklers/heat detectors +++++++++++++++++++++++++ */
 
     CLIP_GEOMETRY;
-    draw_devices();
+    DrawDevices();
     if(viswindrose)DrawWindRosesDevices();
-    SNIFF_ERRORS("after draw_devices");
+    SNIFF_ERRORS("after DrawDevices");
 
     if(visaxislabels == 1){
       UNCLIP;
@@ -102,10 +126,10 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
     /* ++++++++++++++++++++++++ draw user ticks +++++++++++++++++++++++++ */
 
     if(visUSERticks == 1){
-      Antialias(ON);
+      AntiAliasLine(ON);
       UNCLIP;
       DrawUserTicks();
-      Antialias(OFF);
+      AntiAliasLine(OFF);
       SNIFF_ERRORS("after DrawTicks");
     }
 
@@ -119,7 +143,7 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
     /* ++++++++++++++++++++++++ draw ticks +++++++++++++++++++++++++ */
 
-    if(showgravity == 1){
+    if(showgravity_vector == 1){
       UNCLIP;
       DrawGravityAxis();
       SNIFF_ERRORS("after drawaxis");
@@ -145,7 +169,7 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
       pcolor[0] = 255 * foregroundcolor[0];
       pcolor[1] = 255 * foregroundcolor[1];
       pcolor[2] = 255 * foregroundcolor[2];
-      drawsphere(0.03, pcolor);
+      DrawSphere(0.03, pcolor);
       glPopMatrix();
     }
 
@@ -160,8 +184,8 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
         UNCLIP;
         for(igrid = 0;igrid<nmeshes;igrid++){
           meshi = meshinfo + igrid;
-          drawgrid(meshi);
-          SNIFF_ERRORS("drawgrid");
+          DrawGrid(meshi);
+          SNIFF_ERRORS("DrawGrid");
         }
       }
     }
@@ -173,7 +197,7 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
   if(mode == SELECTOBJECT){
     if(select_device == 1){
       CLIP_GEOMETRY;
-      draw_devices();
+      DrawDevices();
       SNIFF_ERRORS("after drawselect_devices");
       return;
     }
@@ -184,19 +208,29 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
   if(mode == SELECTOBJECT){
     if(select_avatar == 1){
       CLIP_GEOMETRY;
-      draw_select_avatars();
-      SNIFF_ERRORS("after draw_select_avatars");
+      DrawSelectAvatars();
+      SNIFF_ERRORS("after DrawSelectAvatars");
       return;
     }
   }
 
-  /* ++++++++++++++++++++++++ draw selected tours +++++++++++++++++++++++++ */
+  /* ++++++++++++++++++++++++ draw selected avatars +++++++++++++++++++++++++ */
+  if(mode==SELECTOBJECT){
+    if(select_geom!=GEOM_PROP_NONE){
+      CLIP_GEOMETRY;
+      DrawSelectGeom();
+      SNIFF_ERRORS("after DrawSelectGeom");
+      return;
+    }
+  }
+
+  /* ++++++++++++++++++++++++ DrawSelectTours +++++++++++++++++++++++++ */
 
   if(mode == SELECTOBJECT){
     if(edittour == 1 && ntourinfo>0){
       CLIP_GEOMETRY;
-      drawselect_tours();
-      SNIFF_ERRORS("after drawselect_tours");
+      DrawSelectTours();
+      SNIFF_ERRORS("after DrawSelectTours");
       return;
     }
   }
@@ -206,22 +240,22 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
   if(showtours == 1){
     CLIP_GEOMETRY;
-    drawtours();
-    SNIFF_ERRORS("after drawtours");
+    DrawTours();
+    SNIFF_ERRORS("after DrawTours");
   }
 
   /* ++++++++++++++++++++++++ draw stereo parallax indicator +++++++++++++++++++++++++ */
 
   if(show_parallax == 1){
     UNCLIP;
-    Antialias(ON);
+    AntiAliasLine(ON);
     glLineWidth(linewidth);
     glBegin(GL_LINES);
     glColor3fv(foregroundcolor);
     glVertex3f(0.75, 0.0, 0.25);
     glVertex3f(0.75, 1.0, 0.25);
     glEnd();
-    Antialias(OFF);
+    AntiAliasLine(OFF);
   }
 
   /* ++++++++++++++++++++++++ draw blockages +++++++++++++++++++++++++ */
@@ -234,30 +268,30 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
   if(ngeominfoptrs>0){
     CLIP_GEOMETRY;
-    draw_geom(DRAW_OPAQUE, GEOM_STATIC);
-    draw_geom(DRAW_OPAQUE, GEOM_DYNAMIC);
-    SNIFF_ERRORS("draw_geom");
+    DrawGeom(DRAW_OPAQUE, GEOM_STATIC);
+    DrawGeom(DRAW_OPAQUE, GEOM_DYNAMIC);
+    SNIFF_ERRORS("DrawGeom");
   }
 
   /* ++++++++++++++++++++++++ draw diagnostic geometry +++++++++++++++++++++++++ */
 
   if(show_geometry_diagnostics == 1){
     CLIP_GEOMETRY;
-    draw_geomdiag();
-    SNIFF_ERRORS("draw_geomdiag");
+    DrawGeomDiag();
+    SNIFF_ERRORS("DrawGeomDiag");
   }
 
   /* ++++++++++++++++++++++++ draw shooter points +++++++++++++++++++++++++ */
 
   if(showshooter != 0 && shooter_active == 1){
     CLIP_VALS;
-    draw_shooter();
-    SNIFF_ERRORS("draw_shooter");
+    DrawShooter();
+    SNIFF_ERRORS("DrawShooter");
   }
 
   /* ++++++++++++++++++++++++ draw terrain +++++++++++++++++++++++++ */
 
-  if(visTerrainType != TERRAIN_HIDDEN&&nterraininfo>0){
+  if(visTerrainType != TERRAIN_HIDDEN&&nterraininfo>0&&ngeominfo==0){
     int i;
 
     //shaded 17 0
@@ -269,41 +303,21 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
     CLIP_GEOMETRY;
     for(i = 0;i<nterraininfo;i++){
       terraindata *terri;
-      int only_geom;
 
       terri = terraininfo + i;
-      if(terri->loaded == 1){
-        only_geom = 0;
-      }
-      else{
-        only_geom = 1;
-      }
       switch(visTerrainType){
       case TERRAIN_3D:
-        drawterrain(terri, only_geom);
+        DrawTerrain(terri);
         break;
       case TERRAIN_2D_STEPPED:
-        if(cullfaces == 1)glDisable(GL_CULL_FACE);
-        glPushMatrix();
-        glScalef(SCALE2SMV(1.0), SCALE2SMV(1.0), SCALE2SMV(1.0));
-        glTranslatef(-xbar0, -ybar0, -zbar0);
-        DrawContours(&meshinfo[i].terrain_contour);
-        glPopMatrix();
-        if(cullfaces == 1)glEnable(GL_CULL_FACE);
-        break;
       case TERRAIN_2D_LINE:
-        glPushMatrix();
-        glScalef(SCALE2SMV(1.0), SCALE2SMV(1.0), SCALE2SMV(1.0));
-        glTranslatef(-xbar0, -ybar0, -zbar0);
-        DrawLineContours(&meshinfo[i].terrain_contour, 1.0);
-        glPopMatrix();
         break;
       case TERRAIN_3D_MAP:
         if(terrain_texture != NULL&&terrain_texture->loaded == 1){
-          drawterrain_texture(terri, only_geom);
+          DrawTerrainTexture(terri);
         }
         else{
-          drawterrain(terri, only_geom);
+          DrawTerrain(terri);
         }
         break;
       default:
@@ -328,7 +342,7 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
   if(showpatch == 1){
     CLIP_VALS;
-    draw_patchframe(DRAW_OPAQUE);
+    DrawBoundaryFrame(DRAW_OPAQUE);
   }
 
   /* ++++++++++++++++++++++++ draw labels +++++++++++++++++++++++++ */
@@ -342,28 +356,39 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
   if(showiso == 1){
     CLIP_VALS;
-    drawiso(DRAW_OPAQUE);
+    DrawIso(DRAW_OPAQUE);
   }
 
   /* ++++++++++++++++++++++++ draw zone fire modeling info +++++++++++++++++++++++++ */
 
   if(nrooms>0){
     CLIP_GEOMETRY;
-    drawroomgeom();
-    SNIFF_ERRORS("after drawroomgeom");
-  }
-  if(nrooms>0){
+    DrawZoneRoomGeom();
+    SNIFF_ERRORS("after DrawZoneRoomGeom");
+
     if(showzone == 1){
       CLIP_VALS;
-      drawfiredata();
-      SNIFF_ERRORS("after drawroomdata");
-      if(ReadZoneFile == 1 && nzvents>0){
-        drawventdata();
-        SNIFF_ERRORS("after drawventdata");
+      DrawZoneFireData();
+      SNIFF_ERRORS("after DrawZoneFireData");
+      if(ReadZoneFile == 1){
+        if(nzvents>0){
+          DrawZoneVentData();
+          SNIFF_ERRORS("after DrawZoneVentData");
+        }
+        if(have_wall_data==1&&vis_wall_data==1){
+          DrawZoneWallData();
+          SNIFF_ERRORS("after DrawZoneWallData");
+        }
       }
     }
   }
 
+#ifdef pp_SMOKETEST
+  if(show3dsmoke==1&&usegpu==0&&hrrpuv_max_blending==1){
+    CLIP_VALS;
+    DrawSmokeFrame(SMOKE3D_FIRE_ONLY);
+  }
+#endif
 
   //**********************************************************************************
   //**********************************************************************************
@@ -378,13 +403,13 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
   if(ngeominfoptrs>0){
     CLIP_GEOMETRY;
-    draw_geom(DRAW_TRANSPARENT, GEOM_STATIC);
-    draw_geom(DRAW_TRANSPARENT, GEOM_DYNAMIC);
+    DrawGeom(DRAW_TRANSPARENT, GEOM_STATIC);
+    DrawGeom(DRAW_TRANSPARENT, GEOM_DYNAMIC);
   }
 
   if(showiso == 1){
     CLIP_VALS;
-    drawiso(DRAW_TRANSPARENT);
+    DrawIso(DRAW_TRANSPARENT);
   }
 
   /* ++++++++++++++++++++++++ draw transparent faces +++++++++++++++++++++++++ */
@@ -394,40 +419,61 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
   /* ++++++++++++++++++++++++ draw 3D smoke +++++++++++++++++++++++++ */
 
-  if(show3dsmoke == 1 || showvolrender == 1){
+  if(show3dsmoke == 1){
     CLIP_VALS;
+#ifdef pp_SMOKETEST
+    if(usegpu==0&&hrrpuv_max_blending==1){
+      DrawSmokeFrame(SMOKE3D_SMOKE_ONLY);
+    }
+    else{
+      DrawSmokeFrame(SMOKE3D_SMOKE_AND_FIRE);
+    }
+#else
     DrawSmokeFrame();
+#endif
   }
+
+  /* ++++++++++++++++++++++++ draw vol smoke +++++++++++++++++++++++++ */
+
+  if(showvolrender == 1&&show3dsmoke==0){
+    CLIP_VALS;
+    DrawVolSmokeFrame();
+  }
+
   if(show_light_position_direction == 1)DrawLightDirections();
+#ifdef pp_SMOKETEST
   if(smoke_test == 1)DrawSmokeTest();
+#endif
 
   if(active_smokesensors == 1 && show_smokesensors != SMOKESENSORS_HIDDEN){
     CLIP_VALS;
-    getsmokesensors();
-    draw_devices_val();
+    GetSmokeSensors();
+    DrawDevicesVal();
   }
 
   /* ++++++++++++++++++++++++ draw zone fire modeling info +++++++++++++++++++++++++ */
 
   if(nrooms>0 && showzone == 1){
     CLIP_VALS;
-    drawroomdata();
-    SNIFF_ERRORS("after drawroomdata");
+    DrawZoneRoomData();
+    SNIFF_ERRORS("after DrawZoneRoomData");
   }
 
   /* ++++++++++++++++++++++++ draw boundary files +++++++++++++++++++++++++ */
 
   if(showpatch == 1){
     CLIP_VALS;
-    draw_patchframe(DRAW_TRANSPARENT);
+    DrawBoundaryFrame(DRAW_TRANSPARENT);
   }
 
   /* ++++++++++++++++++++++++ draw slice files +++++++++++++++++++++++++ */
 
   if((show_node_slices_and_vectors == 1 || show_cell_slices_and_vectors==1) || (showslice == 1 && use_transparency_data == 1)){
-    CLIP_VALS;
-    DrawSliceFrame();
-    SNIFF_ERRORS("after DrawSliceFrame");
+    if(nslice_loaded>0||ngeomslice_loaded>0){
+      CLIP_VALS;
+      DrawSliceFrame();
+      SNIFF_ERRORS("after DrawSliceFrame");
+    }
   }
 
   /* ++++++++++++++++++++++++ draw transparent blockages +++++++++++++++++++++++++ */
@@ -450,9 +496,9 @@ void ShowScene2(int mode, int view_mode, int quad, GLint s_left, GLint s_down){
 
   if(showplot3d == 1){
     CLIP_VALS;
-    draw_plot3dframe();
+    DrawPlot3dFrame();
   }
-  SNIFF_ERRORS("after drawplot3d");
+  SNIFF_ERRORS("after DrawPlot3dFrame");
 }
 
 /* ------------------ ShowScene ------------------------ */
@@ -490,9 +536,9 @@ void ShowScene(int mode, int view_mode, int quad, GLint s_left, GLint s_down, sc
       SNIFF_ERRORS("after ViewportTimebar");
     }
 
-    if(VP_colorbar.doit == 1){
-      ViewportColorbar(quad, s_left, s_down);
-      SNIFF_ERRORS("after ViewportColorbar");
+    if(VP_vcolorbar.doit == 1){
+      ViewportVerticalColorbar(quad, s_left, s_down);
+      SNIFF_ERRORS("after ViewportVerticalColorbar");
     }
 
     if(VP_title.doit == 1){
@@ -504,14 +550,18 @@ void ShowScene(int mode, int view_mode, int quad, GLint s_left, GLint s_down, sc
     SNIFF_ERRORS("after ViewportScene");
   }
 
-
-
-  /* ++++++++++++++++++++++++ draw "fancy" colorbar +++++++++++++++++++++++++ */
+  /* ++++++++++++++++++++++++ draw colorbar path using rgb as physical coordinates +++++++++++++++++++++++++ */
 
   if(viscolorbarpath == 1){
     if(colorbar_hidescene == 1)UNCLIP;
-    DrawColorbarPath();
-    SNIFF_ERRORS("after setColorbarClipPlanes 1");
+    if(mode==SELECTOBJECT){
+      DrawSelectColorbar();
+      SNIFF_ERRORS("after DrawSelectColorbars");
+    }
+    else{
+      DrawColorbarPath();
+      SNIFF_ERRORS("after DrawColorbarPath");
+    }
   }
   if(viscolorbarpath==0||colorbar_hidescene==0)ShowScene2(mode, view_mode, quad, s_left, s_down);
 

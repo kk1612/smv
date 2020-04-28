@@ -6,12 +6,23 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <math.h>
+#ifdef pp_OSX
+#include <unistd.h>
+#endif
 #ifdef WIN32
+#ifdef __MINGW32__
+#undef S_IFBLK
+#undef S_ISBLK
+#undef S_ISFIFO
+#undef S_ISDIR
+#undef S_ISCHR
+#undef S_ISREG
+#endif
 #include <dirent_win.h>
 #else
 #include <dirent.h>
 #endif
-#include "MALLOC.h"
+#include "MALLOCC.h"
 #include "datadefs.h"
 #include "file_util.h"
 #ifdef pp_HASH
@@ -22,6 +33,14 @@
 
 
 unsigned int *random_ints, nrandom_ints;
+
+/* ----------------------- AppendString ----------------------------- */
+
+char *AppendString(char *S1, char *S2) {
+  strcpy(append_string, S1);
+  strcat(append_string, S2);
+  return append_string;
+}
 
 /* ----------------------- InitRandAB ----------------------------- */
 
@@ -241,7 +260,7 @@ void TrimCommas(char *line){
   char *c;
 
   for(c = line + strlen(line) - 1;c>=line;c--){
-    if(isspace(*c))continue;
+    if(isspace((unsigned char)(*c)))continue;
     if(strncmp(c,",",1)!=0)break;
     *c=' ';
   }
@@ -260,7 +279,7 @@ void TrimBack(char *line){
   len = strlen(line);
   if(len==0)return;
   for(c=line+len-1; c>=line; c--){
-    if(isspace(*c))continue;
+    if(isspace((unsigned char)(*c)))continue;
     *(c+1)='\0';
     return;
   }
@@ -276,7 +295,7 @@ char *TrimFront(char *line){
   char *c;
 
   for(c=line;c<=line+strlen(line)-1;c++){
-    if(!isspace(*c))return c;
+    if(!isspace((unsigned char)(*c)))return c;
   }
   return line;
 }
@@ -373,13 +392,94 @@ void ScaleString(const char *stringfrom, char *stringto, const float *scale){
   Num2String(stringto,val);
 }
 
+/* ------------------ ScaleFloat ------------------------ */
+
+float ScaleFloat2Float(float floatfrom, const float *scale){
+  float val;
+
+  val = floatfrom;
+  if(scale!=NULL)val = scale[0]*val+scale[1];
+  return val;
+}
+
 /* ------------------ ScaleFloat2String ------------------------ */
 
 void ScaleFloat2String(float floatfrom, char *stringto, const float *scale){
   float val;
 
-  val = scale[0]*floatfrom+scale[1];
+  val = floatfrom;
+  if(scale!=NULL)val = scale[0]*val+scale[1];
   Num2String(stringto,val);
+}
+
+/* ------------------ GetFormat ------------------------ */
+
+char *GetFormat(int bef, int aft, char *format){
+  strcpy(format, "");
+  sprintf(format, "%s%i%s%i%s", "%",bef,".",aft,"f");
+  return format;
+}
+
+/* ------------------ SliceNum2String ------------------------ */
+
+void SliceNum2String(char *string, float tval, int ndecimals){
+  float tval2, mant10;
+  int exp10;
+  char format[20];
+
+  tval2 = ABS(tval);
+  if(0.01-.001<=tval2&&tval2<0.1){
+    sprintf(string, GetFormat(3,ndecimals+1,format), tval);
+  }
+  else if(0.1<=tval2&&tval2<1.0){
+    sprintf(string, GetFormat(3,ndecimals+1,format), tval);
+  }
+  else if(1.0<=tval2&&tval2<10.0){
+    sprintf(string, GetFormat(3,ndecimals+1,format), tval);
+  }
+  else if(10.0<=tval2&&tval2<100.0){
+    sprintf(string, GetFormat(3,ndecimals,format), tval);
+  }
+  else if(100.0<=tval2&&tval2<1000.0){
+    sprintf(string, GetFormat(3,ndecimals-1,format), tval);
+  }
+  else if(1000.0<=tval2&&tval2<10000.0){
+    sprintf(string, GetFormat(4,ndecimals-1,format), tval);
+  }
+  else if(10000.0<=tval2&&tval2<100000.0){
+    sprintf(string, GetFormat(5,ndecimals-1,format), tval);
+  }
+  else if(tval2==0.0){
+    STRCPY(string, "0.00");
+  }
+  else{
+    mant10 = FrExp10(tval, &exp10);
+    mant10 = (float)((int)(10.0f*mant10+0.5f))/10.0f;
+    if(mant10>=10.0f){
+      mant10 /= 10.0f;
+      exp10++;
+    }
+    if(exp10<-99){
+      STRCPY(string, "0.00");
+    }
+    else if(exp10>=-99&&exp10<-9){
+      sprintf(string, "%2.1f%i", mant10, exp10);
+    }
+    else if(exp10>99){
+      STRCPY(string, "***");
+    }
+    else{
+      if(exp10==0){
+        sprintf(string, "%2.1f", mant10);
+      }
+      else{
+        sprintf(string, "%2.1fE%i", mant10, exp10);
+      }
+    }
+
+    /*sprintf(string,"%1.1e",tval); */
+  }
+  if(strlen(string)>9)fprintf(stderr, "***fatal error - overwriting string\n");
 }
 
 /* ------------------ Num2String ------------------------ */
@@ -561,6 +661,36 @@ float FrExp10(float x, int *exp10){
   return mantissa;
 }
 
+/* ------------------ GetFloatLabel ------------------------ */
+
+char *GetFloatLabel(float val, char *label){
+  if(val>=1000000.0){
+    sprintf(label,"%.1fM", val/1000000.0);
+  }
+  else if(val>=1000.0&&val<1000000.0){
+    sprintf(label, "%.1fK", val/1000.0);
+  }
+  else{
+    sprintf(label, "%f", val);
+  }
+  return label;
+}
+
+/* ------------------ GetIntLabel ------------------------ */
+
+char *GetIntLabel(int val, char *label){
+  if(val>=1000000){
+    sprintf(label, "%.1fM", (float)val/1000000.0);
+  }
+  else if(val>=1000&&val<1000000){
+    sprintf(label, "%.1fK", (float)val/1000.0);
+  }
+  else{
+    sprintf(label, "%i", val);
+  }
+  return label;
+}
+
 /* ------------------ GetString ------------------------ */
 
 char *GetString(char *buffer){
@@ -617,7 +747,7 @@ int Match(char *buffer, const char *key){
   lenbuffer=strlen(buffer);
   if(lenbuffer<lenkey)return NOTMATCH; // buffer shorter than key so no match
   if(strncmp(buffer,key,lenkey) != 0)return NOTMATCH; // key doesn't match buffer so no match
-  if(lenbuffer>lenkey&&!isspace(buffer[lenkey]))return NOTMATCH;
+  if(lenbuffer>lenkey&&!isspace((unsigned char)buffer[lenkey]))return NOTMATCH;
   return MATCH;
 }
 
@@ -636,7 +766,7 @@ int MatchUpper(char *buffer, const char *key){
   for(i=0;i<lenkey;i++){
     if(toupper(buffer[i])!=toupper(key[i]))return NOTMATCH;
   }
-  if(lenbuffer>lenkey&&!isspace(buffer[lenkey]))return NOTMATCH;
+  if(lenbuffer>lenkey&&!isspace((unsigned char)buffer[lenkey]))return NOTMATCH;
   return MATCH;
 }
 
@@ -740,7 +870,7 @@ void GetProgVersion(char *PROGversion){
   strcpy(PROGversion,PROGVERSION);
 }
 
-/* ------------------ setisolabels ------------------------ */
+/* ------------------ SetLabelsIso ------------------------ */
 
 int SetLabelsIso(flowlabels *flowlabel, char *longlabel, char *shortlabel, char *unit, float *levels, int nlevels){
   char buffer[255];
@@ -822,15 +952,184 @@ int SetLabels(flowlabels *flowlabel, char *longlabel, char *shortlabel, char *un
   return LABEL_OK;
 }
 
+/* ------------------ AppendLabels ------------------------ */
+
+int AppendLabels(flowlabels *flowlabel, char *suffix_label){
+  size_t newlen;
+  char *longlabel;
+
+  if(flowlabel==NULL || flowlabel->longlabel==NULL)return LABEL_OK;
+  if(suffix_label == NULL || strlen(suffix_label)==0)return LABEL_OK;
+
+  newlen = strlen(flowlabel->longlabel) + strlen(suffix_label);
+  if(NewMemory((void **)&longlabel, (unsigned int)(newlen+1)) == 0)return LABEL_ERR;
+  STRCPY(longlabel,flowlabel->longlabel);
+  STRCAT(longlabel, suffix_label);
+  FREEMEMORY(flowlabel->longlabel);
+  flowlabel->longlabel=longlabel;
+
+  return LABEL_OK;
+}
+
+/* ------------------ ReadLabelsBNDS ------------------------ */
+
+int ReadLabelsBNDS(flowlabels *flowlabel, BFILE *stream, char *bufferD, char *bufferE, char *bufferF, char *suffix_label){
+  char buffer2[255], *buffer;
+  size_t len;
+  int len_suffix_label = 0;
+
+  if(stream != NULL){
+    if(FGETS(buffer2, 255, stream) == NULL){
+      strcpy(buffer2, "*");
+    }
+    strcpy(bufferD, buffer2);
+  }
+  else{
+    strcpy(buffer2, bufferD);
+  }
+
+  len = strlen(buffer2);
+  buffer = TrimFront(buffer2);
+  TrimBack(buffer);
+  len = strlen(buffer);
+  if(suffix_label != NULL)len_suffix_label = strlen(suffix_label);
+  if(NewMemory((void **)&flowlabel->longlabel, (unsigned int)(len + len_suffix_label + 1)) == 0)return LABEL_ERR;
+  STRCPY(flowlabel->longlabel, buffer);
+  if(suffix_label != NULL&&strlen(suffix_label) > 0)STRCAT(flowlabel->longlabel, suffix_label);
+
+  if(stream != NULL){
+    if(FGETS(buffer2, 255, stream) == NULL){
+      strcpy(buffer2, "**");
+    }
+    strcpy(bufferE, buffer2);
+  }
+  else{
+    strcpy(buffer2, bufferE);
+  }
+
+  len = strlen(buffer2);
+  buffer = TrimFront(buffer2);
+  TrimBack(buffer);
+  len = strlen(buffer);
+  if(NewMemory((void **)&flowlabel->shortlabel, (unsigned int)(len + 1)) == 0)return LABEL_ERR;
+  STRCPY(flowlabel->shortlabel, buffer);
+
+  if(stream != NULL){
+    if(FGETS(buffer2, 255, stream) == NULL){
+      strcpy(buffer2, "***");
+    }
+    strcpy(bufferF, buffer2);
+  }
+  else{
+    strcpy(buffer2, bufferF);
+  }
+
+  len = strlen(buffer2);
+  buffer = TrimFront(buffer2);
+  TrimBack(buffer);
+  len = strlen(buffer) + 1;// allow room for deg C symbol in case it is present
+  if(NewMemory((void *)&flowlabel->unit, (unsigned int)(len + 1)) == 0)return LABEL_ERR;
+#ifdef pp_DEG
+  if(strlen(buffer) == 1 && strcmp(buffer, "C") == 0){
+    unsigned char *unit;
+
+    unit = (unsigned char *)flowlabel->unit;
+    unit[0] = DEG_SYMBOL;
+    unit[1] = 'C';
+    unit[2] = '\0';
+  }
+  else{
+    STRCPY(flowlabel->unit, buffer);
+  }
+#else
+  STRCPY(flowlabel->unit, buffer);
+#endif
+  return LABEL_OK;
+}
+
+
 /* ------------------ ReadLabels ------------------------ */
 
 int ReadLabels(flowlabels *flowlabel, BFILE *stream, char *suffix_label){
   char buffer2[255], *buffer;
   size_t len;
   int len_suffix_label = 0;
+  int len_skip_label = 10;  // add extra space to label in case there is an isosurface skip parameter
+  int return_val = LABEL_OK;
+
+  if(FGETS(buffer2, 255, stream)==NULL){
+    strcpy(buffer2, "*");
+    return_val = LABEL_ERR;
+  }
+
+  len = strlen(buffer2);
+  buffer = TrimFront(buffer2);
+  TrimBack(buffer);
+  len = strlen(buffer);
+  if(suffix_label!=NULL)len_suffix_label = strlen(suffix_label);
+  if(flowlabel!=NULL){
+    if(NewMemory((void **)&flowlabel->longlabel, (unsigned int)(len+len_suffix_label+len_skip_label+1))==0)return LABEL_ERR;
+    STRCPY(flowlabel->longlabel, buffer);
+    if(suffix_label!=NULL&&strlen(suffix_label)>0)STRCAT(flowlabel->longlabel, suffix_label);
+  }
+
+  if(FGETS(buffer2, 255, stream)==NULL){
+    strcpy(buffer2, "**");
+    return_val = LABEL_ERR;
+  }
+
+  len = strlen(buffer2);
+  buffer = TrimFront(buffer2);
+  TrimBack(buffer);
+  len = strlen(buffer);
+  if(flowlabel!=NULL){
+    if(NewMemory((void **)&flowlabel->shortlabel, (unsigned int)(len+1))==0)return LABEL_ERR;
+    STRCPY(flowlabel->shortlabel, buffer);
+  }
+
+  if(FGETS(buffer2, 255, stream)==NULL){
+    strcpy(buffer2, "***");
+    return_val = LABEL_ERR;
+  }
+
+  len = strlen(buffer2);
+  buffer = TrimFront(buffer2);
+  TrimBack(buffer);
+  len = strlen(buffer)+1;// allow room for deg C symbol in case it is present
+  if(flowlabel!=NULL){
+    if(NewMemory((void *)&flowlabel->unit, (unsigned int)(len+1))==0)return LABEL_ERR;
+#ifdef pp_DEG
+    if(strlen(buffer)==1&&strcmp(buffer, "C")==0){
+      unsigned char *unit;
+
+      unit = (unsigned char *)flowlabel->unit;
+      unit[0] = DEG_SYMBOL;
+      unit[1] = 'C';
+      unit[2] = '\0';
+    }
+    else{
+      STRCPY(flowlabel->unit, buffer);
+    }
+#else
+    STRCPY(flowlabel->unit, buffer);
+#endif
+  }
+  return return_val;
+}
+
+#ifdef pp_PLOT3D_STATIC
+/* ------------------ ReadPlotLabels ------------------------ */
+
+int ReadPlot3DLabels(flowlabels *flowlabel, BFILE *stream, char *suffix_label, char *labels_static){
+  char buffer2[255], *buffer;
+  size_t len;
+  int len_suffix_label = 0;
+  int len_skip_label = 10;  // add extra space to label in case there is an isosurface skip parameter
+  int return_val = LABEL_OK;
 
   if(FGETS(buffer2,255,stream)==NULL){
     strcpy(buffer2,"*");
+    return_val =  LABEL_ERR;
   }
 
   len=strlen(buffer2);
@@ -838,47 +1137,56 @@ int ReadLabels(flowlabels *flowlabel, BFILE *stream, char *suffix_label){
   TrimBack(buffer);
   len=strlen(buffer);
   if(suffix_label!=NULL)len_suffix_label = strlen(suffix_label);
-  if(NewMemory((void **)&flowlabel->longlabel,(unsigned int)(len+len_suffix_label+1))==0)return LABEL_ERR;
-  STRCPY(flowlabel->longlabel,buffer);
-  if(suffix_label!=NULL&&strlen(suffix_label)>0)STRCAT(flowlabel->longlabel, suffix_label);
+  if(flowlabel!=NULL){
+    flowlabel->longlabel = labels_static;
+    STRCPY(flowlabel->longlabel, buffer);
+    if(suffix_label!=NULL&&strlen(suffix_label)>0)STRCAT(flowlabel->longlabel, suffix_label);
+  }
 
   if(FGETS(buffer2,255,stream)==NULL){
     strcpy(buffer2,"**");
+    return_val = LABEL_ERR;
   }
 
   len=strlen(buffer2);
   buffer=TrimFront(buffer2);
   TrimBack(buffer);
   len=strlen(buffer);
-  if(NewMemory((void **)&flowlabel->shortlabel,(unsigned int)(len+1))==0)return LABEL_ERR;
-  STRCPY(flowlabel->shortlabel,buffer);
+  if(flowlabel!=NULL){
+    flowlabel->shortlabel = labels_static + MAXPLOT3DLABELSIZE;
+    STRCPY(flowlabel->shortlabel, buffer);
+  }
 
   if(FGETS(buffer2,255,stream)==NULL){
     strcpy(buffer2,"***");
+    return_val = LABEL_ERR;
   }
 
   len=strlen(buffer2);
   buffer=TrimFront(buffer2);
   TrimBack(buffer);
   len=strlen(buffer)+1;// allow room for deg C symbol in case it is present
-  if(NewMemory((void *)&flowlabel->unit,(unsigned int)(len+1))==0)return LABEL_ERR;
+  if(flowlabel!=NULL){
+    flowlabel->unit = labels_static + 2*MAXPLOT3DLABELSIZE;
 #ifdef pp_DEG
-  if(strlen(buffer)==1&&strcmp(buffer,"C")==0){
-    unsigned char *unit;
+    if(strlen(buffer)==1&&strcmp(buffer, "C")==0){
+      unsigned char *unit;
 
-    unit=(unsigned char *)flowlabel->unit;
-    unit[0]=DEG_SYMBOL;
-    unit[1]='C';
-    unit[2]='\0';
-  }
-  else{
-    STRCPY(flowlabel->unit,buffer);
-  }
+      unit = (unsigned char *)flowlabel->unit;
+      unit[0] = DEG_SYMBOL;
+      unit[1] = 'C';
+      unit[2] = '\0';
+    }
+    else{
+      STRCPY(flowlabel->unit, buffer);
+    }
 #else
-  STRCPY(flowlabel->unit,buffer);
+    STRCPY(flowlabel->unit, buffer);
 #endif
-  return LABEL_OK;
+  }
+  return return_val;
 }
+#endif
 
 /* ------------------ Date2Day ------------------------ */
 
@@ -1062,6 +1370,14 @@ unsigned int DiffDate(char *token, char *tokenbase){
   return difft;
 }
 
+#ifdef pp_BETA
+  #define SET_VERSIONTITLE
+#else
+#ifndef pp_OFFICIAL_RELEASE
+  #define SET_VERSIONTITLE
+#endif
+#endif
+
 /* ------------------ GetBaseTitle ------------------------ */
 
 void GetBaseTitle(char *progname, char *title_base){
@@ -1080,16 +1396,11 @@ void GetBaseTitle(char *progname, char *title_base){
 
   strcat(title_base, " ");
   strcat(title_base, version);
-#ifdef pp_BETA
-  strcat(title_base, "(");
+
+#ifdef SET_VERSIONTITLE
+  if(strcmp(version,"")!=0)strcat(title_base, "(");
   strcat(title_base, git_version);
-  strcat(title_base, ")");
-#else
-#ifndef pp_OFFICIAL_RELEASE
-  strcat(title_base, "(");
-  strcat(title_base, git_version);
-  strcat(title_base, ")");
-#endif
+  if(strcmp(version,"")!=0)strcat(title_base, ")");
 #endif
   strcat(title_base, " - ");
 }
@@ -1266,7 +1577,7 @@ unsigned char *GetHashSHA256(char *file){
 
 /* ------------------ UsageCommon ------------------------ */
 
-void UsageCommon(char *prog, int option){
+void UsageCommon(int option){
   if(option == HELP_SUMMARY){
     PRINTF("  -help      - display help summary\n");
     PRINTF("  -help_all  - display all help info\n");
@@ -1285,8 +1596,8 @@ void UsageCommon(char *prog, int option){
 
 /* ------------------ ParseCommonOptions ------------------------ */
 
-void ParseCommonOptions(int argc, char **argv){
-  int i, no_minus;
+int ParseCommonOptions(int argc, char **argv){
+  int i, no_minus,first_arg=0;
 
   no_minus = 0;
   for(i = 1; i<argc; i++){
@@ -1294,6 +1605,10 @@ void ParseCommonOptions(int argc, char **argv){
 
     argi = argv[i];
     if(argi==NULL||argi[0]!='-'){
+      if(first_arg==0){
+        first_arg = i;
+        return first_arg;
+      }
       no_minus = 1;
       continue;
     }
@@ -1332,13 +1647,15 @@ void ParseCommonOptions(int argc, char **argv){
     }
 #endif
   }
+  return first_arg;
 }
+
 /* ------------------ version ------------------------ */
 
 #ifdef pp_HASH
 void PRINTversion(char *progname, char *progfullpath, int option){
 #else
-void PRINTversion(char *progname, char *progfullpath){
+void PRINTversion(char *progname){
 #endif
   char version[256];
   char githash[256];
@@ -1351,41 +1668,44 @@ void PRINTversion(char *progname, char *progfullpath){
 
   PRINTF("\n");
   PRINTF("%s\n\n", releasetitle);
-  PRINTF("Version          : %s\n", version);
+  if(strcmp(version, "") != 0){
+    PRINTF("Version          : %s\n", version);
+  }
   PRINTF("Revision         : %s\n", githash);
   PRINTF("Revision Date    : %s\n", gitdate);
   PRINTF("Compilation Date : %s %s\n", __DATE__, __TIME__);
+#ifndef pp_COMPVER
+#define pp_COMPVER "unknown"
+#endif
+  PRINTF("Compiler         : %s\n", pp_COMPVER);
+
 #ifdef pp_HASH
-#ifndef _DEBUG
   if(option==HASH_MD5||option==HASH_ALL){
     unsigned char *hash = NULL;
 
     hash = GetHashMD5(progfullpath);
-    if(hash!=NULL)PRINTF("MD5 hash         : %s\n", hash);
+    if(hash!=NULL)PRINTF("Checksum(MD5)    : %s\n", hash);
     FREEMEMORY(hash);
   }
   if(option==HASH_SHA1||option==HASH_ALL){
     unsigned char *hash = NULL;
 
     hash = GetHashSHA1(progfullpath);
-    if(hash!=NULL)PRINTF("SHA1 hash        : %s\n", hash);
+    if(hash!=NULL)PRINTF("Checksum(SHA1)   : %s\n", hash);
     FREEMEMORY(hash);
   }
   if(option==HASH_SHA256||option==HASH_ALL){
     unsigned char *hash = NULL;
 
     hash = GetHashSHA256(progfullpath);
-    if(hash!=NULL)PRINTF("SHA256 hash      : %s\n", hash);
+    if(hash!=NULL)PRINTF("Checksum(SHA256) : %s\n", hash);
     FREEMEMORY(hash);
   }
-#endif
 #endif
 #ifdef WIN32
   PRINTF("Platform         : WIN64 ");
 #ifdef pp_INTEL
   PRINTF(" (Intel C/C++)");
-#else
-  PRINTF(" (MSVS C/C++)");
 #endif
   PRINTF("\n");
 #endif
@@ -1396,8 +1716,3 @@ void PRINTversion(char *progname, char *progfullpath){
   PRINTF("Platform         : LINUX64\n");
 #endif
 }
-
-
-
-
-

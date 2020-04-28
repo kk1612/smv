@@ -5,8 +5,6 @@
 
 &MESH IJK=16,16,32, XB=0.0,1.6,0.0,1.6,0.0,3.2 /
 
-&MISC HRRPUV_MAX_SMV=1300.0/
-
 &DUMP NFRAMES=2,DT_DEVC=0.1,SMOKE3D=.FALSE. /
 
 &INIT XB=0.2,1.4,0.2,1.4,0.5,2.2  TEMPERATURE=600.0 /
@@ -68,7 +66,7 @@
 &VENT XB=0.0,1.6,0.0,1.6,3.2,3.2,SURF_ID='OPEN'/
 
 &PART ID='tracers',MASSLESS=.TRUE.,
-   QUANTITIES(1:3)='U-VELOCITY','V-VELOCITY','W-VELOCITY'
+   QUANTITIES(1:3)='PARTICLE U','PARTICLE V','PARTICLE W'
    SAMPLING_FACTOR=10 /  Description of massless tracer particles. Apply at a
                                                              solid surface with the PART_ID='tracers'
 

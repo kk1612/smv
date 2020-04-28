@@ -1,5 +1,3 @@
 #!/bin/bash
-source $IFORT_COMPILER/bin/compilervars.sh intel64
-
-rm -f *.o
+rm -f *.o dem2fds_linux_64
 make -f ../Makefile intel_linux_64

@@ -6,7 +6,7 @@
 #include <math.h>
 #include "svdiff.h"
 #include "string_util.h"
-#include "MALLOC.h"
+#include "MALLOCC.h"
 
 //dummy change to bump version number to 1.0.10
 //dummy change to force githash change
@@ -35,7 +35,7 @@ void Usage(char *prog, int option){
   PRINTF("  resolutions in smv_case2 must be integer multiples of the corresponding x, y, z mesh\n");
   PRINTF("  resolutions in smv_case1 when differencing slice files.\n\n");
 
-  UsageCommon(prog, HELP_SUMMARY);
+  UsageCommon(HELP_SUMMARY);
 
   if(option == HELP_ALL){
     PRINTF("  -s1 dir1 - directory containing case smv_case1.smv\n");
@@ -46,7 +46,7 @@ void Usage(char *prog, int option){
     PRINTF("  -ns      - do not difference slice files\n");
     PRINTF("  -smv     - view case in smokeview when differencing is complete\n");
     PRINTF("  -type label - difference only data of type label (in boundary and slice files)\n");
-    UsageCommon(prog, HELP_ALL);
+    UsageCommon(HELP_ALL);
   }
   PRINTF("\n  smv_case1,smv_case2 - Two smokeview cases to compare.\n");
 }
@@ -56,6 +56,7 @@ void Usage(char *prog, int option){
 int main(int argc, char **argv){
 
   char *smv1=NULL, *smv2=NULL, *arg;
+  bufferstreamdata *smv_buffer1, *smv_buffer2;
   char smv1_out[1024];
   char svdlogfile[1024];
   char *smoke1, *smoke2, smv_out[1024];
@@ -188,6 +189,7 @@ int main(int argc, char **argv){
     }
   }
 
+  smoke1=NULL;
   strcpy(smv1_out,"");
   if(smv1!=NULL){
     strcat(smv1_out,smv1);
@@ -261,25 +263,34 @@ int main(int argc, char **argv){
   if(stream_in2==NULL){
     fprintf(stderr,"*** Error The .smv file, %s, could not be opened for input.\n",smoke2);
   }
-  if(stream_out==NULL||stream_in1==NULL||stream_in2==NULL)return 1;
+  if(stream_out==NULL||stream_in1==NULL||stream_in2==NULL){
+    if(stream_out!=NULL)fclose(stream_out);
+    if(stream_in1!=NULL)fclose(stream_in1);
+    if(stream_in2!=NULL)fclose(stream_in2);
+    return 1;
+  }
+  fclose(stream_in1);
+  fclose(stream_in2);
 
   caseinfo[0].dir=sourcedir1;
-  caseinfo[0].endian=0;
   caseinfo[1].dir=sourcedir2;
-  caseinfo[1].endian=0;
 
   PRINTF("reading %s\n",smoke1);
   FFLUSH();
-  ReadSMV(stream_in1, stream_out, caseinfo);
-  fclose(stream_in1);
+
+  smv_buffer1 = GetSMVBuffer(smoke1, NULL);
+
+  ReadSMV(smv_buffer1, stream_out, caseinfo);
+  FCLOSE(smv_buffer1);
 
   PRINTF("reading %s\n",smoke2);
   FFLUSH();
-  ReadSMV(stream_in2, NULL, caseinfo+1);
-  fclose(stream_in2);
+  smv_buffer2 = GetSMVBuffer(smoke2, NULL);
+  ReadSMV(smv_buffer2, NULL, caseinfo+1);
+  FCLOSE(smv_buffer2);
 
   if(no_plot3d==0){
-    setup_plot3d(stream_out);
+    SetupPlot3D(stream_out);
     diff_plot3ds(stream_out);
   }
   if(no_slice==0){

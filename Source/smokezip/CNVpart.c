@@ -8,7 +8,7 @@
 #include <math.h>
 #include <zlib.h>
 #include "svzip.h"
-#include "MALLOC.h"
+#include "MALLOCC.h"
 #include "isodefs.h"
 #include "compress.h"
 
@@ -205,7 +205,6 @@ void convert_part(part *parti, int *thread_index){
   int *nquantities, *npoints;
   float time_local;
   int error;
-  int endiandata;
   int *tagdata;
   float *pdata;
   int sizebefore=0, sizeafter=0, size;
@@ -258,9 +257,6 @@ void convert_part(part *parti, int *thread_index){
     sprintf(threadinfo[*thread_index].label,"prt5 %i",fileindex);
   }
 #endif
-
-  endiandata=GetEndian();
-  if(endianswitch==1)endiandata=1-endiandata;
 
   partfile=parti->file;
   partmesh=parti->partmesh;
@@ -363,7 +359,6 @@ void convert_part(part *parti, int *thread_index){
 
   lenfile=strlen(parti->file);
   LOCK_COMPRESS;
-  FORTget_file_unit(&unit,&parti->unit_start);
   FORTopenpart(parti->file,&unit,&error,lenfile);
   UNLOCK_COMPRESS;
 
@@ -479,7 +474,7 @@ void convert_part(part *parti, int *thread_index){
     ncompressed_int=0;
     if(ntotal_int>0){
       ncompressed_zlib=BUFFER_SIZE;
-      compress_zlib(int_buffer_compressed, &ncompressed_zlib, (unsigned char *)int_buffer_uncompressed, 4*ntotal_int);
+      CompressZLIB(int_buffer_compressed, &ncompressed_zlib, (unsigned char *)int_buffer_uncompressed, 4*ntotal_int);
       ncompressed_int = ncompressed_zlib;
       sizeafter+=(4+ncompressed_int);
       fwrite(&ncompressed_int,4,1,partstream);
@@ -489,7 +484,7 @@ void convert_part(part *parti, int *thread_index){
     ncompressed_char=0;
     if(ntotal_char>0){
       ncompressed_zlib=BUFFER_SIZE;
-      compress_zlib(char_buffer_compressed, &ncompressed_zlib, char_buffer_uncompressed, ntotal_char);
+      CompressZLIB(char_buffer_compressed, &ncompressed_zlib, char_buffer_uncompressed, ntotal_char);
       ncompressed_char = ncompressed_zlib;
       sizeafter+=(4+ncompressed_char);
       fwrite(&ncompressed_char,4,1,partstream);
@@ -532,7 +527,7 @@ void convert_part(part *parti, int *thread_index){
     GetFileSizeLabel(sizeafter,after_label);
     PRINTF("    records=%i, ",count);
     PRINTF("Sizes: original=%s, ",before_label);
-    PRINTF("compressed=%s (%4.1f%s reduction)\n",after_label,(float)sizebefore/(float)sizeafter,GLOBx);
+    PRINTF("compressed=%s (%4.1f%s)\n",after_label,(float)sizebefore/(float)sizeafter,GLOBx);
   }
 
 }
@@ -544,10 +539,6 @@ void Get_Part_Bounds(void){
   float *pdata;
   int *tagdata;
   int fdsversion;
-  int endiandata;
-
-  endiandata=GetEndian();
-  if(endianswitch==1)endiandata=1-endiandata;
 
   PRINTF("Determining particle file bounds\n");
 
@@ -579,8 +570,6 @@ void Get_Part_Bounds(void){
     PRINTF("  Examining %s\n",parti->file);
     lenfile=strlen(parti->file);
     LOCK_COMPRESS;
-    unit=15;
-    FORTget_file_unit(&unit,&parti->unit_start);
     FORTopenpart(parti->file,&unit,&error1,lenfile);
     UNLOCK_COMPRESS;
 
@@ -667,8 +656,6 @@ void part2iso(part *parti, int *thread_index){
   int *tagdata;
   int fdsversion;
 
-  int endiandata;
-
   int blocknumber;
   FILE_SIZE len_partfile;
   int unit;
@@ -709,16 +696,12 @@ void part2iso(part *parti, int *thread_index){
   PRINTF("Converting %s to\n",parti->file);
 #endif
 
-  endiandata=GetEndian();
-  if(endianswitch==1)endiandata=1-endiandata;
-
   NewMemory((void **)&pdata,1000000*sizeof(float));
   NewMemory((void **)&tagdata,1000000*sizeof(int));
   NewMemory((void **)&partindex,1000000*sizeof(int));
 
   len_partfile=strlen(parti->file);
   LOCK_COMPRESS;
-  FORTget_file_unit(&unit,&parti->unit_start);
   FORTopenpart(parti->file,&unit,&error1,len_partfile);
   UNLOCK_COMPRESS;
 
@@ -1028,8 +1011,6 @@ void part2object(part *parti, int *thread_index){
   int *tagdata;
   int fdsversion;
 
-  int endiandata;
-
   int blocknumber;
   FILE_SIZE len_partfile;
   int unit;
@@ -1070,16 +1051,12 @@ void part2object(part *parti, int *thread_index){
   PRINTF("Converting %s to\n",parti->file);
 #endif
 
-  endiandata=GetEndian();
-  if(endianswitch==1)endiandata=1-endiandata;
-
   NewMemory((void **)&pdata,1000000*sizeof(float));
   NewMemory((void **)&tagdata,1000000*sizeof(int));
   NewMemory((void **)&partindex,1000000*sizeof(int));
 
   len_partfile=strlen(parti->file);
   LOCK_COMPRESS;
-  FORTget_file_unit(&unit,&parti->unit_start);
   FORTopenpart(parti->file,&unit,&error1,len_partfile);
   UNLOCK_COMPRESS;
 

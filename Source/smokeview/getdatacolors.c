@@ -165,15 +165,15 @@ void GetBoundaryColors2(float *t, int nt, unsigned char *it,
   }
 }
 
-/* ------------------ WriteBoundINI ------------------------ */
+/* ------------------ WriteBoundIni ------------------------ */
 
-void WriteBoundINI(void){
+void WriteBoundIni(void){
   FILE *stream = NULL;
   char *fullfilename = NULL;
   int i;
 
-  if(boundini_filename == NULL)return;
-  fullfilename = GetFileName(smokeviewtempdir, boundini_filename, tempdir_flag);
+  if(boundinfo_filename == NULL)return;
+  fullfilename = GetFileName(smokeviewtempdir, boundinfo_filename, NOT_FORCE_IN_DIR);
 
   if(fullfilename == NULL)return;
 
@@ -190,7 +190,7 @@ void WriteBoundINI(void){
       patchdata *patchj;
 
       patchj = patchinfo + j;
-      if(patchi->type == patchj->type&&patchi->filetype == patchj->filetype){
+      if(patchi->shortlabel_index == patchj->shortlabel_index&&patchi->patch_filetype == patchj->patch_filetype){
         skipi = 1;
         break;
       }
@@ -206,15 +206,15 @@ void WriteBoundINI(void){
       }
     }
     fprintf(stream, "B_BOUNDARY\n");
-    fprintf(stream, " %f %f %f %f %i %s\n", boundi->global_min, boundi->percentile_min, boundi->percentile_max, boundi->global_max, patchi->filetype, patchi->label.shortlabel);
+    fprintf(stream, " %f %f %f %f %i %s\n", boundi->global_min, boundi->percentile_min, boundi->percentile_max, boundi->global_max, patchi->patch_filetype, patchi->label.shortlabel);
   }
   if(stream != NULL)fclose(stream);
   FREEMEMORY(fullfilename);
 }
 
-/* ------------------ UpdatePatchBounds ------------------------ */
+/* ------------------ UpdateBoundaryBounds ------------------------ */
 
-void UpdatePatchBounds(patchdata *patchi){
+void UpdateBoundaryBounds(patchdata *patchi){
   histogramdata full_histogram;
   bounddata *boundi;
   int j;
@@ -227,7 +227,9 @@ void UpdatePatchBounds(patchdata *patchi){
     patchdata *patchj;
 
     patchj=patchinfo+j;
-    if(patchj->type!=patchi->type||patchj->filetype!=patchi->filetype)continue;
+    if(patchi->boundary != patchj->boundary)continue;
+    if(patchi->patch_filetype == PATCH_GEOMETRY_SLICE || patchj->patch_filetype == PATCH_GEOMETRY_SLICE)continue;
+    if(patchj->shortlabel_index != patchi->shortlabel_index)continue; // dont consider file type for now (node/cell centered, structdured/unstructured etc)
     MergeHistogram(&full_histogram,patchj->histogram,MERGE_BOUNDS);
   }
 
@@ -242,22 +244,25 @@ void UpdatePatchBounds(patchdata *patchi){
     patchdata *patchj;
 
     patchj=patchinfo+j;
-    if(patchi==patchj||patchj->type!=patchi->type||patchj->filetype!=patchi->filetype)continue;
+    if (patchi == patchj)continue;
+    if(patchi->boundary != patchj->boundary)continue;
+    if(patchi->patch_filetype == PATCH_GEOMETRY_SLICE || patchj->patch_filetype == PATCH_GEOMETRY_SLICE)continue;
+    if(patchj->shortlabel_index != patchi->shortlabel_index)continue;
 
     boundj = &patchj->bounds;
     memcpy(boundj,boundi,sizeof(bounddata));
   }
-  WriteBoundINI();
+  WriteBoundIni();
   FreeHistogram(&full_histogram);
 }
 
 /* ------------------ GetBoundaryColors3 ------------------------ */
 
-void GetBoundaryColors3(patchdata *patchi, float *t, int nt, unsigned char *it,
+void GetBoundaryColors3(patchdata *patchi, float *t, int start, int nt, unsigned char *it,
               int settmin, float *ttmin, int settmax, float *ttmax,
               float *tmin_arg, float *tmax_arg,
               int nlevel,
-              char **labels, char *scale, float *tvals256,
+              char **patchlabels, float *patchvalues, char *scale, float *tvals256,
               int *extreme_min, int *extreme_max
               ){
   int n;
@@ -266,7 +271,7 @@ void GetBoundaryColors3(patchdata *patchi, float *t, int nt, unsigned char *it,
   int itt;
   float new_tmin, new_tmax, tmin2, tmax2;
 
-  UpdatePatchBounds(patchi);
+  UpdateBoundaryBounds(patchi);
 
   CheckMemory;
   tmin2=patchi->bounds.global_min;
@@ -301,10 +306,13 @@ void GetBoundaryColors3(patchdata *patchi, float *t, int nt, unsigned char *it,
   range = new_tmax - new_tmin;
   factor = 0.0f;
   if(range!=0.0f)factor = (float)(255-2*extreme_data_offset)/range;
-  for(n=0;n<nt;n++){
+
+  t+=start;
+  it+=start;
+  for(n=start;n<nt;n++){
     float val;
 
-    val = *t;
+    val = *t++;
 
     if(val<new_tmin){
       itt=0;
@@ -318,7 +326,6 @@ void GetBoundaryColors3(patchdata *patchi, float *t, int nt, unsigned char *it,
       itt=extreme_data_offset+(int)(factor*(val-new_tmin));
     }
     *it++=CLAMP(itt,colorbar_offset,255-colorbar_offset);
-    t++;
   }
   CheckMemory;
   STRCPY(scale,"");
@@ -343,20 +350,23 @@ void GetBoundaryColors3(patchdata *patchi, float *t, int nt, unsigned char *it,
   factor = range/(nlevel-2);
   for(n=1;n<nlevel-2;n++){
     tval = new_tmin + (n-1)*factor;
-    Num2String(&labels[n][0],tval);
+    Num2String(&patchlabels[n][0],tval);
+    patchvalues[n] = tval;
   }
   tval = new_tmin + (nlevel-3)*factor;
   for(n=0;n<256;n++){
     tvals256[n] = (new_tmin*(255-n) + n*new_tmax)/255.;
   }
-  Num2String(&labels[nlevel-2][0],tval);
+  Num2String(&patchlabels[nlevel-2][0],tval);
+  patchvalues[nlevel-2] = tval;
   tval = new_tmax;
-  Num2String(&labels[nlevel-1][0],tval);
+  Num2String(&patchlabels[nlevel-1][0],tval);
+  patchvalues[nlevel-1] = tval;
 }
 
-/* ------------------ UpdateAllPatchColors ------------------------ */
+/* ------------------ UpdateAllBoundaryColors ------------------------ */
 
-void UpdateAllPatchColors(void){
+void UpdateAllBoundaryColors(void){
   int i;
 
   for(i=0;i<nmeshes;i++){
@@ -372,10 +382,10 @@ void UpdateAllPatchColors(void){
 
     npatchvals = meshi->npatch_times*meshi->npatchsize;
 
-    GetBoundaryColors3(patchi,meshi->patchval, npatchvals, meshi->cpatchval,
+    GetBoundaryColors3(patchi,meshi->patchval, 0, npatchvals, meshi->cpatchval,
     setpatchmin,&patchmin, setpatchmax,&patchmax,
     &patchmin_global, &patchmax_global,
-    nrgb, colorlabelpatch,patchi->scale,boundarylevels256,
+    nrgb, colorlabelpatch, colorvaluespatch, patchi->scale,boundarylevels256,
     &patchi->extreme_min,&patchi->extreme_max);
   }
 }
@@ -384,7 +394,7 @@ void UpdateAllPatchColors(void){
 
 void GetBoundaryLabels(
               float local_tmin, float local_tmax,
-              char **labels, char *scale, float *tvals256, int nlevel){
+              char **boundarylabels, float *boundaryvalues, char *scale, float *tvals256, int nlevel){
   int n;
   float factor, tval, range;
   int expmin, expmax;
@@ -412,22 +422,24 @@ void GetBoundaryLabels(
   factor = range/(nlevel-2);
   for(n=1;n<nlevel-2;n++){
     tval = local_tmin + (n-1)*factor;
-    Num2String(&labels[n][0],tval);
+    Num2String(&boundarylabels[n][0],tval);
+    boundaryvalues[n] = tval;
   }
   tval = local_tmin + (nlevel-3)*factor;
   for(n=0;n<256;n++){
     tvals256[n] = (local_tmin*(255-n) + n*local_tmax)/255.;
   }
-  Num2String(&labels[nlevel-2][0],tval);
+  Num2String(&boundarylabels[nlevel-2][0],tval);
+  boundaryvalues[nlevel-2] = tval;
   tval = local_tmax;
-  Num2String(&labels[nlevel-1][0],tval);
+  Num2String(&boundarylabels[nlevel-1][0],tval);
+  boundaryvalues[nlevel-1] = tval;
 }
 
 /* ------------------ UpdatePart5Extremes ------------------------ */
 
 void UpdatePart5Extremes(void){
-  int ii,i,j,k,m;
-  part5data *datacopy;
+  int i;
 
   for(i=0;i<npart5prop;i++){
     partpropdata *propi;
@@ -436,48 +448,11 @@ void UpdatePart5Extremes(void){
     propi->extreme_max=0;
     propi->extreme_min=0;
   }
-
-
-  for(ii=0;ii<npartinfo;ii++){
-    partdata *parti;
-
-    parti = partinfo + ii;
-    if(parti->loaded==0||parti->display==0)continue;
-    datacopy = parti->data5;
-    for(i=0;i<parti->ntimes;i++){
-      for(j=0;j<parti->nclasses;j++){
-        partclassdata *partclassi;
-        unsigned char *irvals;
-
-        partclassi = parti->partclassptr[j];
-        irvals = datacopy->irvals;
-        for(k=2;k<partclassi->ntypes;k++){
-          partpropdata *prop_id;
-
-          prop_id = get_partprop(partclassi->labels[k].longlabel);
-          if(prop_id==NULL)continue;
-
-          if(strcmp(partclassi->labels[k].longlabel,"HUMAN_COLOR")==0){
-          }
-          else{
-            for(m=0;m<datacopy->npoints;m++){
-              int irval;
-
-              irval=*irvals++;
-              if(irval==0)prop_id->extreme_min=1;
-              if(irval==255)prop_id->extreme_max=1;
-            }
-          }
-        }
-        datacopy++;
-      }
-    }
-  }
 }
 
-/* ------------------ GetPart5Colors ------------------------ */
+/* ------------------ GetPartColors ------------------------ */
 
-void GetPart5Colors(partdata *parti, int nlevel, int convert_flag){
+void GetPartColors(partdata *parti, int nlevel, int convert_flag){
   int i;
   part5data *datacopy;
   // float *diameter_data;
@@ -502,7 +477,8 @@ void GetPart5Colors(partdata *parti, int nlevel, int convert_flag){
       for(k=2;k<partclassi->ntypes;k++){
         partpropdata *prop_id;
 
-        prop_id = get_partprop(partclassi->labels[k].longlabel);
+        if(datacopy->npoints==0)continue;
+        prop_id = GetPartProp(partclassi->labels[k].longlabel);
         if(prop_id==NULL)continue;
 
         if(strcmp(partclassi->labels[k].longlabel,"HUMAN_COLOR")==0){
@@ -521,13 +497,29 @@ void GetPart5Colors(partdata *parti, int nlevel, int convert_flag){
           int prop_id_index;
           float partimin, partimax;
 
-          valmin = prop_id->valmin;
-          valmax = prop_id->valmax;
+          if(prop_id->setvalmin==PERCENTILE_MIN){
+            valmin = prop_id->percentile_min;
+          }
+          else if(prop_id->setvalmin==SET_MIN){
+            valmin = prop_id->user_min;
+          }
+          else{
+            valmin = prop_id->global_min;
+          }
+          if(prop_id->setvalmax==PERCENTILE_MAX){
+            valmax = prop_id->percentile_max;
+          }
+          else if(prop_id->setvalmax==SET_MAX){
+            valmax = prop_id->user_max;
+          }
+          else{
+            valmax = prop_id->global_max;
+          }
           dval = valmax - valmin;
           if(dval<=0.0)dval=1.0;
           prop_id_index = prop_id-part5propinfo;
-          partimin = parti->valmin[prop_id_index];
-          partimax = parti->valmax[prop_id_index];
+          partimin = parti->global_min[prop_id_index];
+          partimax = parti->global_max[prop_id_index];
 
           if(convert_flag==PARTFILE_MAP){
             int m;
@@ -537,15 +529,7 @@ void GetPart5Colors(partdata *parti, int nlevel, int convert_flag){
               int irval;
 
               val = *rvals++;
-              if(val<valmin){
-                irval = 0;
-              }
-              else if(val>valmax){
-                irval = 255;
-              }
-              else{
-                irval = extreme_data_offset+(float)(255-2*extreme_data_offset)*(val-valmin)/dval;
-              }
+              irval = extreme_data_offset+(float)(255-2*extreme_data_offset)*(val-valmin)/dval;
               *irvals++ = CLAMP(irval, 0, 255);
             }
           }
@@ -558,15 +542,7 @@ void GetPart5Colors(partdata *parti, int nlevel, int convert_flag){
 
               irval = *irvals;
               val = partimin+(float)(irval-extreme_data_offset)*(partimax-partimin)/(255.0-2.0*extreme_data_offset);
-              if(val<valmin){
-                irval = 0;
-              }
-              else if(val>valmax){
-                irval = 255;
-              }
-              else{
-                irval = extreme_data_offset+(float)(255-2*extreme_data_offset)*(val-valmin)/dval;
-              }
+              irval = extreme_data_offset+(float)(255-2*extreme_data_offset)*(val-valmin)/dval;
               *irvals++ = CLAMP(irval, 0, 255);
             }
           }
@@ -584,98 +560,90 @@ void GetPart5Colors(partdata *parti, int nlevel, int convert_flag){
       v_vel_data=NULL;
       w_vel_data=NULL;
 
-      if(partclassi->col_azimuth>=0){
-        azimuth_data=datacopy->rvals+partclassi->col_azimuth*datacopy->npoints;
-      }
-      if(partclassi->col_diameter>=0){
-       // diameter_data=datacopy->rvals+partclassi->col_diameter*datacopy->npoints;
-      }
-      if(partclassi->col_elevation>=0){
-        elevation_data=datacopy->rvals+partclassi->col_elevation*datacopy->npoints;
-      }
-      if(partclassi->col_length>=0){
-        length_data=datacopy->rvals+partclassi->col_length*datacopy->npoints;
-      }
-      if(partclassi->col_u_vel>=0){
-        u_vel_data=datacopy->rvals+partclassi->col_u_vel*datacopy->npoints;
-      }
-      if(partclassi->col_v_vel>=0){
-        v_vel_data=datacopy->rvals+partclassi->col_v_vel*datacopy->npoints;
-      }
-      if(partclassi->col_w_vel>=0){
-        w_vel_data=datacopy->rvals+partclassi->col_w_vel*datacopy->npoints;
-      }
-      flag=0;
-      if(azimuth_data!=NULL&&elevation_data!=NULL&&length_data!=NULL){
-        int m;
-
-        flag=1;
-        dsx = datacopy->dsx;
-        dsy = datacopy->dsy;
-        dsz = datacopy->dsz;
-        for(m=0;m<datacopy->npoints;m++){
-          float az, elev, length;
-
-          az= azimuth_data[m]*DEG2RAD;
-          elev = elevation_data[m]*DEG2RAD;
-          length=SCALE2SMV(length_data[m]);
-          dsx[m] = cos(az)*cos(elev)*length/2.0;
-          dsy[m] = sin(az)*cos(elev)*length/2.0;
-          dsz[m] =         sin(elev)*length/2.0;
+      if(partfast==NO){
+        if(partclassi->col_azimuth>=0){
+          azimuth_data = datacopy->rvals+partclassi->col_azimuth*datacopy->npoints;
         }
-      }
-      if(u_vel_data!=NULL&&v_vel_data!=NULL&&w_vel_data!=NULL){
-        float denom;
-        int m;
-        partpropdata *prop_U, *prop_V, *prop_W;
-
-        prop_U = get_partprop(partclassi->labels[partclassi->col_u_vel+2].longlabel);
-        prop_V = get_partprop(partclassi->labels[partclassi->col_v_vel+2].longlabel);
-        prop_W = get_partprop(partclassi->labels[partclassi->col_w_vel+2].longlabel);
-        if(prop_U!=NULL&&prop_V!=NULL&&prop_W!=NULL){
-          float umax, vmax, wmax;
-
-          umax = MAX(ABS(prop_U->valmin),ABS(prop_U->valmax));
-          vmax = MAX(ABS(prop_V->valmin),ABS(prop_V->valmax));
-          wmax = MAX(ABS(prop_W->valmin),ABS(prop_W->valmax));
-
-          denom = sqrt(umax*umax+vmax*vmax+wmax*wmax);
-          if(denom==0.0)denom=1.0;
+        if(partclassi->col_diameter>=0){
+          // diameter_data=datacopy->rvals+partclassi->col_diameter*datacopy->npoints;
         }
-        else{
-          denom=1.0;
+        if(partclassi->col_elevation>=0){
+          elevation_data = datacopy->rvals+partclassi->col_elevation*datacopy->npoints;
         }
+        if(partclassi->col_length>=0){
+          length_data = datacopy->rvals+partclassi->col_length*datacopy->npoints;
+        }
+        if(partclassi->col_u_vel>=0){
+          u_vel_data = datacopy->rvals+partclassi->col_u_vel*datacopy->npoints;
+        }
+        if(partclassi->col_v_vel>=0){
+          v_vel_data = datacopy->rvals+partclassi->col_v_vel*datacopy->npoints;
+        }
+        if(partclassi->col_w_vel>=0){
+          w_vel_data = datacopy->rvals+partclassi->col_w_vel*datacopy->npoints;
+        }
+        flag = 0;
+        if(azimuth_data!=NULL&&elevation_data!=NULL&&length_data!=NULL){
+          int m;
 
-        flag=1;
-        dsx = datacopy->dsx;
-        dsy = datacopy->dsy;
-        dsz = datacopy->dsz;
-        for(m=0;m<datacopy->npoints;m++){
-          dsx[m] = 0.05*u_vel_data[m]/denom;
-          dsy[m] = 0.05*v_vel_data[m]/denom;
-          dsz[m] = 0.05*w_vel_data[m]/denom;
+          flag = 1;
+          dsx = datacopy->dsx;
+          dsy = datacopy->dsy;
+          dsz = datacopy->dsz;
+          for(m = 0; m<datacopy->npoints; m++){
+            float az, elev, length;
+
+            az = azimuth_data[m]*DEG2RAD;
+            elev = elevation_data[m]*DEG2RAD;
+            length = SCALE2SMV(length_data[m]);
+            dsx[m] = cos(az)*cos(elev)*length/2.0;
+            dsy[m] = sin(az)*cos(elev)*length/2.0;
+            dsz[m] = sin(elev)*length/2.0;
+          }
         }
-      }
-      if(flag==0){
-        FREEMEMORY(datacopy->dsx);
-        FREEMEMORY(datacopy->dsy);
-        FREEMEMORY(datacopy->dsz);
+        if(u_vel_data!=NULL&&v_vel_data!=NULL&&w_vel_data!=NULL){
+          float denom;
+          int m;
+          partpropdata *prop_U, *prop_V, *prop_W;
+
+          prop_U = GetPartProp(partclassi->labels[partclassi->col_u_vel+2].longlabel);
+          prop_V = GetPartProp(partclassi->labels[partclassi->col_v_vel+2].longlabel);
+          prop_W = GetPartProp(partclassi->labels[partclassi->col_w_vel+2].longlabel);
+          if(prop_U!=NULL&&prop_V!=NULL&&prop_W!=NULL){
+            float umax, vmax, wmax;
+
+            umax = MAX(ABS(prop_U->valmin), ABS(prop_U->valmax));
+            vmax = MAX(ABS(prop_V->valmin), ABS(prop_V->valmax));
+            wmax = MAX(ABS(prop_W->valmin), ABS(prop_W->valmax));
+
+            denom = sqrt(umax*umax+vmax*vmax+wmax*wmax);
+            if(denom==0.0)denom = 1.0;
+          }
+          else{
+            denom = 1.0;
+          }
+
+          flag = 1;
+          dsx = datacopy->dsx;
+          dsy = datacopy->dsy;
+          dsz = datacopy->dsz;
+          for(m = 0; m<datacopy->npoints; m++){
+            dsx[m] = 0.05*u_vel_data[m]/denom;
+            dsy[m] = 0.05*v_vel_data[m]/denom;
+            dsz[m] = 0.05*w_vel_data[m]/denom;
+          }
+        }
+        if(flag==0){
+          FREEMEMORY(datacopy->dsx);
+          FREEMEMORY(datacopy->dsy);
+          FREEMEMORY(datacopy->dsz);
+        }
       }
       datacopy++;
     }
   }
-// erase data memory in a separate loop (so all "columns" are available when doing any conversions)
-  datacopy = parti->data5;
-  if(parti->data_type == PARTDATA){
-    for(i = 0; i < parti->ntimes; i++){
-      int j;
+  // erase data memory in a separate loop (so all "columns" are available when doing any conversions)
 
-      for(j = 0; j < parti->nclasses; j++){
-        FREEMEMORY(datacopy->rvals);
-        datacopy++;
-      }
-    }
-  }
   for(i=0;i<npart5prop;i++){
     int n;
     partpropdata *propi;
@@ -687,8 +655,24 @@ void GetPart5Colors(partdata *parti, int nlevel, int convert_flag){
 
     propi = part5propinfo + i;
 
-    local_tmin = propi->valmin;
-    local_tmax = propi->valmax;
+    if(propi->setvalmin==PERCENTILE_MIN){
+      local_tmin = propi->percentile_min;
+    }
+    else if(propi->setvalmin==SET_MIN){
+      local_tmin = propi->user_min;
+    }
+    else{
+      local_tmin = propi->global_min;
+    }
+    if(propi->setvalmax==PERCENTILE_MAX){
+      local_tmax = propi->percentile_max;
+    }
+    else if(propi->setvalmax==SET_MAX){
+      local_tmax = propi->user_max;
+    }
+    else{
+      local_tmax = propi->global_max;
+    }
     scale = propi->scale;
     labels=propi->partlabels;
     ppartlevels256=propi->ppartlevels256;
@@ -728,7 +712,6 @@ void GetPart5Colors(partdata *parti, int nlevel, int convert_flag){
     Num2String(&labels[nlevel-1][0],tval);
     CheckMemory;
   }
-
 }
 
 /* ------------------ GetZoneColor ------------------------ */
@@ -750,7 +733,7 @@ int GetZoneColor(float t, float local_tmin, float local_tmax, int nlevel){
 
 void GetZoneColors(const float *t, int nt, unsigned char *it,
                float ttmin, float ttmax, int nlevel, int nlevel_full,
-               char **labels, char *scale, float *tvals256
+               char **zonelabels, float zonevalues[12], char *scale, float *tvals256
                ){
   int n;
   float dt, factor;
@@ -760,6 +743,7 @@ void GetZoneColors(const float *t, int nt, unsigned char *it,
   float range;
   float tval;
 
+  if(t==NULL||it==NULL)return;
   local_tmin = ttmin;
   local_tmax = ttmax;
 
@@ -806,15 +790,18 @@ void GetZoneColors(const float *t, int nt, unsigned char *it,
   factor = range/(nlevel-2);
   for(n=1;n<nlevel-2;n++){
     tval = local_tmin + (n-1)*factor;
-    Num2String(&labels[n][0],tval);
+    zonevalues[n] = tval;
+    Num2String(&zonelabels[n][0],tval);
   }
   tval = local_tmin + (nlevel-3)*factor;
   for(n=0;n<256;n++){
     tvals256[n] = (local_tmin*(255-n) + n*local_tmax)/255.;
   }
-  Num2String(&labels[nlevel-2][0],tval);
+  zonevalues[nlevel-2] = tval;
+  Num2String(&zonelabels[nlevel-2][0],tval);
   tval = local_tmax;
-  Num2String(&labels[nlevel-1][0],tval);
+  zonevalues[nlevel-1] = tval;
+  Num2String(&zonelabels[nlevel-1][0],tval);
 
 }
 
@@ -961,6 +948,7 @@ void GetPlot3DColors(int plot3dvar, int settmin, float *ttmin, int settmax, floa
   for(n=0;n<nlevel-1;n++){
     tval = local_tmin + n*dt;
     Num2String(&labels[n][0],tval);
+    colorvaluesp3[plot3dvar][n] = tval;
     Num2String(&labelsiso[n][0],tval+dt/2.0);
   }
   for(n=0;n<256;n++){
@@ -968,6 +956,7 @@ void GetPlot3DColors(int plot3dvar, int settmin, float *ttmin, int settmax, floa
   }
   tval = local_tmax;
   Num2String(&labels[nlevel-1][0],tval);
+  colorvaluesp3[plot3dvar][nlevel-1] = tval;
   Num2String(&labelsiso[nlevel-1][0],tval);
 
   for(n=0;n<nlevel;n++){
@@ -996,16 +985,34 @@ void GetPlot3DColors(int plot3dvar, int settmin, float *ttmin, int settmax, floa
   }
 }
 
+/* ------------------ MakeColorLabels ------------------------ */
+
+void MakeColorLabels(char colorlabels[12][11], float colorvalues[12], float tmin_arg, float tmax_arg, int nlevel){
+  float range, dt;
+  int n;
+  
+  range = tmax_arg-tmin_arg;
+  dt = range/(float)(nlevel-2);
+
+  for(n=1;n<nlevel;n++){
+    float tval;
+
+    tval = tmin_arg + (n-1)*dt;
+    colorvalues[n] = tval;
+    SliceNum2String(&colorlabels[n][0], tval, ncolorlabel_decimals);
+  }
+}
+
 /* ------------------ GetSliceColors ------------------------ */
 
 void GetSliceColors(const float *t, int nt, unsigned char *it,
               float local_tmin, float local_tmax,
               int ndatalevel, int nlevel,
-              char labels[12][11],char **scale, float *fscale, float *tlevels256,
+              char colorlabels[12][11], float colorvalues[12], char **scale, float *fscale, float *tlevels256,
               int *extreme_min, int *extreme_max
               ){
   int n;
-  float dt, factor, tval;
+  float factor, tval;
   float range;
   int expmax,expmin;
   int itt;
@@ -1042,6 +1049,7 @@ void GetSliceColors(const float *t, int nt, unsigned char *it,
   STRCPY(*scale,"");
   FrExp10(local_tmax, &expmax);
   FrExp10(local_tmin, &expmin);
+  expmin = MAX(expmin, 0);
   *fscale=1.0;
   if(expmin!=0&&expmax!=0&&expmax-expmin<=2&&(expmin<EXPMIN||expmin>EXPMAX)){
     local_tmin *= pow((double)10.0,(double)-expmin);
@@ -1062,17 +1070,14 @@ void GetSliceColors(const float *t, int nt, unsigned char *it,
     *fscale=pow(10.0,(float)expmin);
   }
 
-  range = local_tmax-local_tmin;
-  dt = range/(float)(nlevel-2);
-  for(n=1;n<nlevel-1;n++){
-    tval = local_tmin + (n-1)*dt;
-    Num2String(&labels[n][0],tval);
-  }
+  MakeColorLabels(colorlabels, colorvalues, local_tmin, local_tmax, nlevel);
+
   for(n=0;n<256;n++){
     tlevels256[n] = (local_tmin*(255-n) + local_tmax*n)/255.;
   }
   tval = local_tmax;
-  Num2String(&labels[nlevel-1][0],tval);
+  colorvalues[nlevel-1] = tval;
+  SliceNum2String(&colorlabels[nlevel-1][0], tval, ncolorlabel_decimals);
 }
 
 /* ------------------ getSliceLabelels ------------------------ */
@@ -1237,8 +1242,8 @@ void UpdateTexturebar(void){
   SNIFF_ERRORS("UpdateTexturebar - glTexImage1D (rgb_iso) ");
 
   glBindTexture(GL_TEXTURE_1D,slicesmoke_colormap_id);
-  glTexImage1D(GL_TEXTURE_1D,0,GL_RGBA,MAXSMOKERGB,0,GL_RGBA,GL_FLOAT,rgb_slicesmokecolormap);
-  SNIFF_ERRORS("UpdateTexturebar - glTexImage1D (rgb_slicesmokecolormap) ");
+  glTexImage1D(GL_TEXTURE_1D,0,GL_RGBA,MAXSMOKERGB,0,GL_RGBA,GL_FLOAT,rgb_slicesmokecolormap_01);
+  SNIFF_ERRORS("UpdateTexturebar - glTexImage1D (rgb_slicesmokecolormap_01) ");
 
   glBindTexture(GL_TEXTURE_1D,volsmoke_colormap_id);
   glTexImage1D(GL_TEXTURE_1D,0,GL_RGBA,MAXSMOKERGB,0,GL_RGBA,GL_FLOAT,rgb_volsmokecolormap);
@@ -1251,7 +1256,7 @@ void UpdateTexturebar(void){
     SNIFF_ERRORS("UpdateTexturebar - glTexSubImage1D (rgb_volsmokecolormap) ");
     glActiveTexture(GL_TEXTURE0);
   }
-  if(gpuactive==1&&SHOW_gslice_data==1){
+  if(gpuactive==1&&SHOW_gslice_data==1&& slice3d_colormap_id_defined==1){
     glActiveTexture(GL_TEXTURE4);
     glTexSubImage1D(GL_TEXTURE_1D,0,0,256,GL_RGBA,GL_FLOAT, rgb_slice);
     SNIFF_ERRORS("updatecolors after glTexSubImage1D (rgb_slice)");
@@ -1300,6 +1305,73 @@ void InitRGB(void){
   }
 }
 
+/* ------------------ HaveFire ------------------------ */
+
+int HaveFire(void) {
+  int i;
+
+  for (i = 0; i < nsmoke3dinfo; i++) {
+    smoke3ddata *smoke3di;
+
+    smoke3di = smoke3dinfo + i;
+    if (smoke3di->loaded == 1) {
+      if (smoke3di->type == HRRPUV)return HRRPUV;
+      if (smoke3di->type == TEMP)return TEMP;
+    }
+  }
+  return 0;
+}
+
+/* ------------------ HaveSoot ------------------------ */
+
+int HaveSoot(void) {
+  int i;
+
+  for(i = 0; i<nsmoke3dinfo; i++) {
+    smoke3ddata *smoke3di;
+
+    smoke3di = smoke3dinfo+i;
+    if(smoke3di->loaded==1&&smoke3di->type==SOOT)return 1;
+  }
+  return 0;
+}
+
+/* ------------------ UpdateCO2Colormap ------------------------ */
+
+void UpdateCO2Colormap(void){
+  int n;
+  float transparent_level_local=1.0;
+  float *co2_cb;
+  float *rgb_colormap=NULL;
+
+  if(use_transparency_data==1)transparent_level_local=transparent_level;
+
+  co2_cb = colorbarinfo[co2_colorbar_index].colorbar;
+  rgb_colormap = rgb_sliceco2colormap_01;
+
+  switch(co2_colormap_type){
+    case CO2_RGB:
+      for(n=0;n<MAXSMOKERGB;n++){
+        rgb_colormap[4*n+0] = (float)co2_color_int255[0] / 255.0;
+        rgb_colormap[4*n+1] = (float)co2_color_int255[1] / 255.0;
+        rgb_colormap[4*n+2] = (float)co2_color_int255[2] / 255.0;
+        rgb_colormap[4*n+3] = transparent_level_local;
+      }
+      break;
+    case CO2_COLORBAR:
+      for(n=0;n<MAXSMOKERGB;n++){
+        rgb_colormap[4*n+0] = co2_cb[3*n+0];
+        rgb_colormap[4*n+1] = co2_cb[3*n+1];
+        rgb_colormap[4*n+2] = co2_cb[3*n+2];
+        rgb_colormap[4*n+3] = transparent_level_local;
+      }
+      break;
+    default:
+      ASSERT(FFALSE);
+      break;
+  }
+}
+
 /* ------------------ UpdateSmokeColormap ------------------------ */
 
 void UpdateSmokeColormap(int option){
@@ -1309,21 +1381,21 @@ void UpdateSmokeColormap(int option){
   float *fire_cb;
   float val, valmin, valmax, valcut;
   int icut;
-  float *rgb_colormap;
-  int have_fire;
+  float *rgb_colormap=NULL;
 
   have_fire = HaveFire();
-  if(option==RENDER_SLICE){
+  if(have_fire==HRRPUV&&option==RENDER_SLICE){
     valmin=global_hrrpuv_min;
     valcut=global_hrrpuv_cutoff;
     valmax=global_hrrpuv_max;
-    rgb_colormap = rgb_slicesmokecolormap;
+    rgb_colormap = rgb_slicesmokecolormap_01;
   }
   else{
-    valmin=temperature_min;
-    valcut=temperature_cutoff;
-    valmax=temperature_max;
+    valmin = global_temp_min;
+    valcut = global_temp_cutoff;
+    valmax = global_temp_max;
     rgb_colormap = rgb_volsmokecolormap;
+    if(have_fire == TEMP)rgb_colormap=rgb_slicesmokecolormap_01;
   }
   icut = (MAXSMOKERGB-1)*((valcut-valmin)/(valmax-valmin));
   icut = CLAMP(icut,2,(MAXSMOKERGB-3));
@@ -1333,18 +1405,18 @@ void UpdateSmokeColormap(int option){
   alpha = colorbarinfo[colorbartype].alpha;
   fire_cb = colorbarinfo[fire_colorbar_index].colorbar;
 
-  switch(firecolormap_type){
+  switch(fire_colormap_type){
     case FIRECOLORMAP_DIRECT:
       for(n=0;n<MAXSMOKERGB;n++){
         if(n<icut||have_fire==0){
-          rgb_colormap[4*n+0] = (float)smoke_red / 255.0;
-          rgb_colormap[4*n+1] = (float)smoke_green / 255.0;
-          rgb_colormap[4*n+2] = (float)smoke_blue / 255.0;
+          rgb_colormap[4*n+0] = (float)smoke_color_int255[0] / 255.0;
+          rgb_colormap[4*n+1] = (float)smoke_color_int255[1] / 255.0;
+          rgb_colormap[4*n+2] = (float)smoke_color_int255[2] / 255.0;
         }
         else{
-          rgb_colormap[4*n+0]=(float)fire_red/255.0;
-          rgb_colormap[4*n+1]=(float)fire_green/255.0;
-          rgb_colormap[4*n+2]=(float)fire_blue/255.0;
+          rgb_colormap[4*n+0]=(float)fire_color_int255[0] /255.0;
+          rgb_colormap[4*n+1]=(float)fire_color_int255[1] /255.0;
+          rgb_colormap[4*n+2]=(float)fire_color_int255[2] /255.0;
         }
         if(alpha[n]==0){
           rgb_colormap[4*n+3]=0.0;
@@ -1354,7 +1426,6 @@ void UpdateSmokeColormap(int option){
         }
       }
       break;
-    case FIRECOLORMAP_NOCONSTRAINT:
     case FIRECOLORMAP_CONSTRAINT:
       for(n=0;n<MAXSMOKERGB;n++){
         float n2,factor;
@@ -1363,12 +1434,22 @@ void UpdateSmokeColormap(int option){
         float smoke_color1[3], smoke_color2[3];
 
         val = valmin + (float)n*(valmax-valmin)/(float)(MAXSMOKERGB-1);
-        if(firecolormap_type==FIRECOLORMAP_CONSTRAINT){
+        if(fire_colormap_type==FIRECOLORMAP_CONSTRAINT){
           if(val<=valcut){
-            n2 = 1+127*(val-valmin)/(valcut-valmin);
+            if(valcut>valmin){
+              n2 = 1+127*(val-valmin)/(valcut-valmin);
+            }
+            else{
+              n2 = 1;
+            }
           }
           else{
-            n2 = 128 + 126*(val-valcut)/(valmax-valcut);
+            if(valmax>valcut){
+              n2 = 128 + 126*(val-valcut)/(valmax-valcut);
+            }
+            else{
+              n2 = 128;
+            }
           }
         }
         else{
@@ -1380,7 +1461,7 @@ void UpdateSmokeColormap(int option){
         factor = CLAMP(factor,0.0,1.0);
         fire1 = fire_cb + 3 * nn2;
         fire2 = fire1 + 3;
-        if(firecolormap_type == FIRECOLORMAP_CONSTRAINT&&val <= valcut){
+        if(fire_colormap_type == FIRECOLORMAP_CONSTRAINT&&val <= valcut){
           smoke_color1[0] = fire1[0];
           smoke_color1[1] = fire1[1];
           smoke_color1[2] = fire1[2];
@@ -1505,7 +1586,7 @@ void UpdateRGBColors(int colorbar_index){
       }
     }
   }
-  if(colorbarflip==1){
+  if(colorbar_flip==1){
     {
       int nnn;
 
@@ -1533,14 +1614,18 @@ void UpdateRGBColors(int colorbar_index){
     if(valindex<0)valindex=0;
     if(valindex>255)valindex=255;
     cci = colorbar_index;
+    if(ABS(colorbar_shift-1.0)>0.0001){
+      cci = SHIFT_VAL(cci, 0, 255, colorbar_shift);
+    }
+
     if(setbw==1){
       highlight_color=highlight_red;
     }
     else{
       highlight_color=highlight_black;
     }
-    cbmin = cci-colorband;
-    cbmax = cci+colorband;
+    cbmin = cci-colorbar_selection_width;
+    cbmax = cci+colorbar_selection_width;
     if(cbmin<0){
       cbmax = cbmax - cbmin;
       cbmin = 0;
@@ -1755,14 +1840,14 @@ void UpdateChopColors(void){
       }
     }
   }
-  if(slicebounds!=NULL&&islicetype!=-1){
+  if(slicebounds!=NULL&&slicefile_labelindex!=-1){
     float smin, smax;
 
-    smin=slicebounds[islicetype].valmin;
-    smax=slicebounds[islicetype].valmax;
+    smin=slicebounds[slicefile_labelindex].dlg_valmin;
+    smax=slicebounds[slicefile_labelindex].dlg_valmax;
 
-    if(setslicechopmin==1){
-      ichopmin=nrgb_full*(slicechopmin-smin)/(smax-smin);
+    if(glui_setslicechopmin==1){
+      ichopmin=nrgb_full*(glui_slicechopmin-smin)/(smax-smin);
       if(ichopmin<0)ichopmin=0;
       if(ichopmin>nrgb_full-1)ichopmin=nrgb_full-1;
       for(i=0;i<ichopmin;i++){
@@ -1776,8 +1861,8 @@ void UpdateChopColors(void){
         rgb_slice[4*i+3]=transparent_level_local*(float)ii/(float)(NCHOP-1);
       }
     }
-    if(setslicechopmax==1){
-      ichopmax=nrgb_full*(slicechopmax - smin)/(smax-smin);
+    if(glui_setslicechopmax==1){
+      ichopmax=nrgb_full*(glui_slicechopmax - smin)/(smax-smin);
       if(ichopmax<0)ichopmax=0;
       if(ichopmax>nrgb_full-1)ichopmax=nrgb_full-1;
       for(i=ichopmax;i<nrgb_full;i++){
@@ -1862,9 +1947,11 @@ void UpdateChopColors(void){
 
     parti = partinfo + i;
     if(parti->loaded==0)continue;
-    AdjustPart5Chops(parti);
+    AdjustPart5Chops(); // only needs to be called once
+    break;
   }
   UpdateTexturebar();
+  ShiftColorbars();
 }
 
 /* ------------------ GetRGB ------------------------ */
@@ -1888,7 +1975,7 @@ void GetRGB(unsigned int val, unsigned char *rr, unsigned char *gg, unsigned cha
 
 /* ------------------ GetColorPtr ------------------------ */
 
-float *GetColorPtr(const float *color){
+float *GetColorPtr(float *color){
   colordata *colorptr,*oldlastcolor,*lastcolor;
 
   int i;
@@ -1930,7 +2017,19 @@ float *GetColorPtr(const float *color){
   return lastcolor->color;
 }
 
-/* ------------------ ConvertColor ------------------------ */
+/* ------------------ GetColorTranPtr ------------------------ */
+
+float *GetColorTranPtr(float *color, float transparency){
+  float col[4];
+
+  col[0] = color[0];
+  col[1] = color[1];
+  col[2] = color[2];
+  col[3] = transparency;
+  return GetColorPtr(col);
+}
+
+  /* ------------------ ConvertColor ------------------------ */
 
 void ConvertColor(int flag){
   colordata *colorptr;

@@ -7,7 +7,7 @@
 #include <math.h>
 #include "svzip.h"
 #include "string_util.h"
-#include "MALLOC.h"
+#include "MALLOCC.h"
 
 //dummy change to bump version number to 1.4.8
 //dummy change to force githash update
@@ -34,7 +34,7 @@ void Usage(char *prog, int option){
   PRINTF("  -t nthread - Compress nthread files at a time (up to %i)\n", NTHREADS_MAX);
 #endif
 
-  UsageCommon(prog, HELP_SUMMARY);
+  UsageCommon(HELP_SUMMARY);
   if(option == HELP_ALL){
     PRINTF("overwrite options:\n");
     PRINTF("  -f  - overwrites all compressed files\n");
@@ -85,7 +85,7 @@ void Usage(char *prog, int option){
     PRINTF("        and creates the .svd file which activates the Smokeview demonstrator\n");
     PRINTF("        mode.\n");
     PRINTF("  -skip skipval - skip frames when compressing files\n\n");
-    UsageCommon(prog, HELP_ALL);
+    UsageCommon(HELP_ALL);
   }
 }
 
@@ -108,8 +108,6 @@ int main(int argc, char **argv){
   char inifile[1024];
   char inifilebase[1024];
   int i;
-  int endian_fds;
-  int endian_info;
   int redirect=0;
 
   SetStdOut(stdout);
@@ -159,7 +157,6 @@ int main(int argc, char **argv){
   GLOBendianfile=NULL;
   GLOBdestdir=NULL;
   GLOBsourcedir=NULL;
-  endianswitch=-1;
   GLOBoverwrite_b=0;
   GLOBoverwrite_s=0;
   GLOBget_bounds=0;
@@ -173,7 +170,6 @@ int main(int argc, char **argv){
   GLOBoverwrite_slice=0;
   GLOBoverwrite_volslice=0;
   GLOBoverwrite_plot3d=0;
-  endian_info=0;
   GLOBcleanfiles=0;
   GLOBsmoke3dzipstep=1;
   GLOBboundzipstep=1;
@@ -320,9 +316,6 @@ int main(int argc, char **argv){
         break;
       case 'c':
         GLOBcleanfiles=1;
-        break;
-      case 'e':
-        endian_info=1;
         break;
       case 'r':
         redirect=1;
@@ -499,46 +492,14 @@ int main(int argc, char **argv){
   if(nsliceinfo>0){
     sliceinfo[0].dup=0;
     for(i=1;i<nsliceinfo;i++){
-      slice *slicei;
+      slicedata *slicei;
 
       slicei = sliceinfo + i;
 
       slicei->dup=0;
-      slicedup(slicei,i);
+      SliceDup(slicei,i);
     }
   }
-
-  if(GetEndian()==1){
-      PRINTF("Smokezip running on a big endian computer.\n");
-  }
-  else{
-      PRINTF("Smokezip running on a little endian computer.\n");
-  }
-  if(GLOBendf==0&&GLOBsyst==0){
-    fprintf(stderr,"Warning: casename.end file is missing.  Endianness of\n");
-    fprintf(stderr,"         FDS boundary file data is unknown.\n");
-    if(GetEndian()==1){
-      fprintf(stderr,"         Assuming FDS boundary data is big endian - \n");
-    }
-    if(GetEndian()==0){
-      fprintf(stderr,"         Assuming FDS boundary data is little endian - \n");
-    }
-    fprintf(stderr,"         or equivalently assuming FDS and Smokezip are\n");
-    fprintf(stderr,"         being run on the same type of computer\n");
-    endianswitch=0;
-  }
-  else{
-    endian_fds=GetEndian()+endianswitch;
-    if(endian_fds==2)endian_fds=0;
-    if(endian_fds==1){
-      PRINTF("FDS was run on a big endian computer. \n\n");
-    }
-    else{
-      PRINTF("FDS was run on a little endian computer.\n\n");
-    }
-  }
-  if(endian_info==1)return 0;
-
   ReadINI(inifile);
 
 #ifdef pp_THREAD
@@ -569,8 +530,8 @@ void *compress_all(void *arg){
 
   thread_index=(int *)(arg);
   if(GLOBdoit_boundary==1)compress_patches(thread_index);
-  if(GLOBdoit_slice==1)compress_slices(thread_index);
-  if(GLOBdoit_volslice==1)compress_volslices(thread_index);
+  if(GLOBdoit_slice==1)CompressSlices(thread_index);
+  if(GLOBdoit_volslice==1)CompressVolSlices(thread_index);
   if(GLOBdoit_smoke3d==1)compress_smoke3ds(thread_index);
 #ifdef pp_PLOT3D
   if(GLOBdoit_plot3d==1)compress_plot3ds(thread_index);
@@ -613,34 +574,34 @@ void print_summary(void){
   PRINTF("\n");
   nsum=0;
   for(i=0;i<nsliceinfo;i++){
-    slice *slicei;
+    slicedata *slicei;
 
     slicei = sliceinfo + i;
     if(slicei->compressed==1)nsum++;
   }
   if(nsum>0){
     for(i=0;i<nsliceinfo;i++){
-      slice *slicei;
+      slicedata *slicei;
       flowlabels *label;
 
       slicei = sliceinfo + i;
       if(slicei->compressed==0)continue;
       label=&slicei->label;
-      PRINTF("%s (%s)\n  %s\n",slicei->file,label->longlabel,slicei->summary);
-      PRINTF("  using: min=%f %s, max=%f %s \n\n",slicei->valmin,label->unit,slicei->valmax,label->unit);
+      PRINTF("%s  (%s)\n %s\n",slicei->file,label->longlabel,slicei->summary);
+      PRINTF("  min=%f %s, max=%f %s \n",slicei->valmin,label->unit,slicei->valmax,label->unit);
     }
   }
 
   nsum=0;
   for(i=0;i<nsliceinfo;i++){
-    slice *slicei;
+    slicedata *slicei;
 
     slicei = sliceinfo + i;
     if(slicei->vol_compressed==1)nsum++;
   }
   if(nsum>0){
     for(i=0;i<nsliceinfo;i++){
-      slice *slicei;
+      slicedata *slicei;
       flowlabels *label;
 
       slicei = sliceinfo + i;
@@ -663,7 +624,7 @@ void print_summary(void){
 
       smoke3di = smoke3dinfo + i;
       if(smoke3di->compressed==0)continue;
-      PRINTF("%s\n  %s\n\n",smoke3di->file,smoke3di->summary);
+      PRINTF("%s\n  %s\n",smoke3di->file,smoke3di->summary);
     }
   }
 
@@ -683,7 +644,7 @@ void print_summary(void){
       if(patchi->compressed==0)continue;
       label=&patchi->label;
       PRINTF("%s (%s)\n  %s\n",patchi->file,label->longlabel,patchi->summary);
-      PRINTF("  using: min=%f %s, max=%f %s \n\n",patchi->valmin,label->unit,patchi->valmax,label->unit);
+      PRINTF("  min=%f %s, max=%f %s \n",patchi->valmin,label->unit,patchi->valmax,label->unit);
     }
   }
 

@@ -1,3 +1,6 @@
+
+# sh2bat makefile
+
 SOURCE_DIR = ../../../Source/
 INC_DIR = -I $(SOURCE_DIR)/zlib128 -I $(SOURCE_DIR)/shared -I $(SOURCE_DIR)/sh2bat
 FILTERC =
@@ -5,6 +8,7 @@ FILTERF =
 
 VPATH = $(SOURCE_DIR)/sh2bat:$(SOURCE_DIR)/shared
 bin = .
+
 ifeq ($(shell echo "check_quotes"),"check_quotes")
   GIT_HASH := $(shell ..\..\..\Utilities\Scripts\githash)
   GIT_DATE := $(shell ..\..\..\Utilities\Scripts\gitlog)
@@ -13,6 +17,16 @@ else
   GIT_DATE := $(shell git log -1 --format=%cd)
 endif
 GITINFO=-Dpp_GITHASH=\"$(GIT_HASH)\" -Dpp_GITDATE=\""$(GIT_DATE)\""
+
+ifeq ($(shell echo "check_quotes"),"check_quotes")
+  INTEL_COMPVERSION := $(shell ..\..\..\Utilities\Scripts\intel_compversion)
+  GNU_COMPVERSION := $(shell ..\..\..\Utilities\Scripts\gnu_compversion)
+else
+  INTEL_COMPVERSION := $(shell ../../../Utilities/Scripts/intel_compversion.sh)
+  GNU_COMPVERSION := $(shell ../../../Utilities/Scripts/gnu_compversion.sh)
+endif
+INTEL_COMPINFO=-Dpp_COMPVER=\"$(INTEL_COMPVERSION)\"
+GNU_COMPINFO=-Dpp_COMPVER=\"$(GNU_COMPVERSION)\"
 
 # Definition of the object variables
 
@@ -34,16 +48,26 @@ no_target:
 
 # ********  rules for each platform supported *************
 
-# ------------- Win 64 ----------------
-#  64 bit windows
+# ------------- intel win 64 ----------------
 
-intel_win_64 : CFLAGS    = -D WIN32 -O2 -D pp_INTEL /nologo $(GITINFO)
+intel_win_64 : CFLAGS    = -D WIN32 -O2 -D pp_INTEL /nologo $(GITINFO) $(INTEL_COMPINFO)
 intel_win_64 : CC        = icl
 intel_win_64 : CPP       = icl
 intel_win_64 : exe       = sh2bat_win_64.exe
 
 intel_win_64 : $(objwin)
 	$(CPP) -o $(bin)/$(exe) $(objwin)
+
+# ------------- gnu win 64 ----------------
+
+gnu_win_64 : CFLAGS    = -D WIN32 -O2  $(GITINFO)
+gnu_win_64 : CC        = gcc
+gnu_win_64 : CPP       = g++
+gnu_win_64 : exe       = sh2bat_win_64.exe
+
+gnu_win_64 : $(obj)
+	$(CPP) -o $(bin)/$(exe) $(obj)
+
 
 #-------------- Clean Target to remove Object and Module files -----------
 

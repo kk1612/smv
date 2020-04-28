@@ -58,6 +58,36 @@
 #endif
 #endif
 
+#ifdef pp_SMOKE3D_FORT
+#ifndef C_FILE
+#define C_FILE 0
+#endif
+#ifndef FORTRAN_FILE
+#define FORTRAN_FILE 1
+#endif
+
+#define FORTSMOKEREAD(var,size, count,STREAM,option) \
+                           if(option==1){FSEEK(STREAM,4,SEEK_CUR);}\
+                           fread(var,size,count,STREAM);\
+                           if(option==1){FSEEK(STREAM,4,SEEK_CUR);}
+
+#define FORTSMOKEREADBR(var,size, count,STREAM,option) \
+                           if(option==1){FSEEK(STREAM,4,SEEK_CUR);}\
+                           returncode=fread(var,size,count,STREAM);\
+                           if(returncode!=count||returncode==0)break;\
+                           if(option==1){FSEEK(STREAM,4,SEEK_CUR);}
+#else
+#define FORTSMOKEREAD(var,size, count,STREAM,option) \
+                           fread(var,size,count,STREAM)
+
+#define FORTSMOKEREADBR(var,size, count,STREAM,option) \
+                           returncode=fread(var,size,count,STREAM);\
+                           if(returncode!=count||returncode==0){
+                             break;\
+                           }
+#endif
+
+
 //***********************
 //************* structures
 //***********************
@@ -67,7 +97,7 @@
 
 typedef struct {
   struct _meshdata *rendermesh;
-  struct _slice *smoke, *fire;
+  struct _slicedata *smoke, *fire;
 } volrenderdata;
 
 /* --------------------------  mesh ------------------------------------ */
@@ -105,8 +135,8 @@ typedef struct {
 
 /* --------------------------  slice ------------------------------------ */
 
-typedef struct _slice {
-  char *file,*filebase;
+typedef struct _slicedata {
+  char *file,*filebase,*boundfile;
   int isvolslice,voltype;
   int unit_start;
   int blocknumber;
@@ -125,14 +155,14 @@ typedef struct _slice {
   histogramdata *histogram;
   flowlabels label;
   int dup;
-} slice;
+} slicedata;
 
 /* --------------------------  bound ------------------------------------ */
 
 typedef struct {
   int setvalmin, setvalmax;
   float valmin, valmax;
-} bound;
+} bounddata;
 
 /* --------------------------  plot3d ------------------------------------ */
 
@@ -148,7 +178,7 @@ typedef struct {
   int filesize;
   int seq_id,autozip;
   int doit, done, count;
-  bound bounds[5];
+  bounddata bounds[5];
   int version;
   flowlabels labels[5];
   int dup;
@@ -165,6 +195,9 @@ typedef struct {
 typedef struct {
   char *file,*filebase;
   int unit_start;
+#ifdef pp_SMOKE3D_FORT
+  int file_type;
+#endif
   char summary[1024];
   int compressed;
   int inuse,is_soot;
@@ -252,21 +285,20 @@ void mt_compress_all(void);
 void RandABsdir(float xyz[3], int dir);
 void rand_cone_dir(float xyz[3], float dir[3], float mincosangle);
 void rand_sphere_dir(float xyz[3]);
-float rand_1d(float xmin, float xmax);
-void rand_2d(float xy[2], float xmin, float xmax, float ymin, float ymax);
-void rand_3d(float xyz[3], float xmin, float xmax, float ymin, float ymax, float zmin, float zmax);
+float Rand1D(float xmin, float xmax);
+void Rand2D(float xy[2], float xmin, float xmax, float ymin, float ymax);
+void Rand3D(float xyz[3], float xmin, float xmax, float ymin, float ymax, float zmin, float zmax);
 void GetStartupSlice(int seq_id);
 void GetStartupSmoke(int seq_id);
-void GetStartupPatch(int seq_id);
-unsigned int uncompress_rle(unsigned char *buffer_in, int nchars_in, unsigned char *buffer_out);
+void GetStartupBoundary(int seq_id);
+unsigned int UnCompressRLE(unsigned char *buffer_in, int nchars_in, unsigned char *buffer_out);
 int ReadSMV(char *file);
 int GetEndian(void);
-int convert_slice(slice *slicei, int *thread_index);
-slice *getslice(char *string);
-void *compress_slices(void *arg);
-void *compress_volslices(void *arg);
+slicedata *GetSlice(char *string);
+void *CompressSlices(void *arg);
+void *CompressVolSlices(void *arg);
 int plot3ddup(plot3d *plot3dj, int iplot3d);
-int slicedup(slice *slicej, int islice);
+int SliceDup(slicedata *slicej, int islice);
 void *compress_plot3ds(void *arg);
 void initpdf(pdfdata *pdf);
 void makesvd(char *destdir, char *smvfile);
@@ -288,7 +320,6 @@ int patchdup(patch *patchj, int ipatch);
 void ReadINI(char *file);
 void ReadINI2(char *file2);
 void Get_Boundary_Bounds(void);
-void Get_Slice_Bounds(void);
 #ifdef pp_PART
 void Get_Part_Bounds(void);
 #endif
@@ -297,7 +328,7 @@ void *compress_smoke3ds(void *arg);
 void Normal(unsigned short *v1, unsigned short *v2, unsigned short *v3, float *normal, float *area);
 float atan3(float y, float x);
 void initvolrender(void);
-void getsliceparms_c(char *file, int *ni, int *nj, int *nk);
+void GetSliceParmsC(char *file, int *ni, int *nj, int *nk);
 
 
 #define FORTgetpartheader1     _F(getpartheader1)
@@ -311,7 +342,6 @@ void getsliceparms_c(char *file, int *ni, int *nj, int *nk);
 #define FORTopenslice          _F(openslice)
 #define FORTopenpart           _F(openpart)
 #define FORTgetsliceframe      _F(getsliceframe)
-#define FORTget_file_unit      _F(get_file_unit)
 
 #ifdef WIN32
 #define STDCALLF extern void _stdcall
@@ -319,7 +349,6 @@ void getsliceparms_c(char *file, int *ni, int *nj, int *nk);
 #define STDCALLF extern void
 #endif
 
-STDCALLF FORTget_file_unit(int *file_unit,int *file_unit_start);
 STDCALLF FORTopenpart(char *partfilename, int *unit, int *error, FILE_SIZE lenfile);
 STDCALLF FORTgetpartheader1(int *unit, int *nclasses, int *fdsversion, int *size);
 STDCALLF FORTgetpartheader2(int *unit, int *nclasses, int *nquantities, int *size);
@@ -328,7 +357,7 @@ STDCALLF FORTgetpartdataframe(int *unit, int *nclasses, int *nquantities, int *n
 STDCALLF FORTclosefortranfile(int *lunit);
 
 STDCALLF FORTgetpatchdata(int *lunit, int *npatch,int *pi1,int *pi2,int *pj1,int *pj2,int *pk1,int *pk2,
-                         float *patch_times,float *pqq, int *ndummy, int *error);
+                         float *patch_times,float *pqq, int *ndummy, int *file_size, int *error);
 STDCALLF FORTopenboundary(char *boundaryfilename, int *boundaryunitnumber,
                          int *version, int *error, FILE_SIZE len);
 STDCALLF FORTgetboundaryheader1(char *boundaryfilename, int *boundaryunitnumber,
@@ -365,7 +394,7 @@ EXTERN int GLOBno_chop;
 EXTERN patch *patchinfo;
 EXTERN meshdata *meshinfo;
 EXTERN smoke3d *smoke3dinfo;
-EXTERN slice *sliceinfo;
+EXTERN slicedata *sliceinfo;
 EXTERN plot3d *plot3dinfo;
 EXTERN part *partinfo;
 EXTERN partclassdata *partclassinfo;
@@ -388,7 +417,7 @@ EXTERN int GLOBoverwrite_plot3d;
 #ifdef pp_PART
 EXTERN int GLOBoverwrite_part;
 #endif
-EXTERN int endianswitch,GLOBoverwrite_b,GLOBoverwrite_s;
+EXTERN int GLOBoverwrite_b,GLOBoverwrite_s;
 EXTERN int GLOBcleanfiles;
 EXTERN char *GLOBdestdir,*GLOBsourcedir;
 EXTERN char GLOBpp[2],GLOBx[2];

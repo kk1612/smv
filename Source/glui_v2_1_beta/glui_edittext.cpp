@@ -123,19 +123,20 @@ int    GLUI_EditText::key_handler( unsigned char key,int modifiers )
     glui->disactivate_current_control();
     return true;
   }
-  else if ( key == 8 ) {       /* BACKSPACE */
+  else if ( key == 8 || key == 127 ) {       /* BACKSPACE  or DEL */
+    if(key == 127)insertion_pt++; // DEL
     if ( sel_start == sel_end ) {   /* no selection */
       if ( insertion_pt > 0 ) {
-	/*** See if we're deleting a period in a float data-type box ***/
-	if ( data_type == GLUI_EDITTEXT_FLOAT AND text[insertion_pt-1]=='.' )
-	  num_periods--;
-	
-	/*** Shift over string first ***/
-	insertion_pt--;
-	for( i=insertion_pt; i< (int)strlen( text ); i++ )
-	  text[i] = text[i+1];    
+ /*** See if we're deleting a period in a float data-type box ***/
+        if ( data_type == GLUI_EDITTEXT_FLOAT AND text[insertion_pt-1]=='.' )
+          num_periods--;
+
+/*** Shift over string first ***/
+          insertion_pt--;
+          for( i=insertion_pt; i< (int)strlen( text ); i++ )
+            text[i] = text[i+1];    
+          }
       }
-    }
     else {                         /* There is a selection */
       clear_substring( MIN(sel_start,sel_end), MAX(sel_start,sel_end ));
       insertion_pt = MIN(sel_start,sel_end);
@@ -147,10 +148,11 @@ int    GLUI_EditText::key_handler( unsigned char key,int modifiers )
     
     /** Check if we only accept numbers **/
     if (data_type == GLUI_EDITTEXT_FLOAT ) {
-      if ( (key < '0' OR key > '9') AND key != '.' AND key != '-' )
+      if ( (key < '0' OR key > '9') AND key != '.' AND key != '-' AND key != 'e' AND key != 'E' AND key != '+' )
 	return true;
 
-      if ( key == '-' ) { /* User typed a '-' */
+	// let user put a '-' sign anywhere for now (so they can put one after an E )
+      if ( 1==0 AND key == '-' ) { /* User typed a '-' */
 
 	/* If user has first character selected, then '-' is allowed */
 	if ( NOT ( MIN(sel_start,sel_end) == 0 AND
@@ -261,7 +263,7 @@ int    GLUI_EditText::key_handler( unsigned char key,int modifiers )
   /*** Now look to see if this string has a period ***/
   num_periods = 0;
   for( i=0; i<(int)strlen(text); i++ )
-    if ( text[i] == '.' )
+   if ( text[i] == '.' )
       num_periods++;
 
   return true;

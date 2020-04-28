@@ -5,6 +5,9 @@
 #include <math.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef WIN32
+#include <windows.h>
+#endif
 #include GLUT_H
 
 #include "string_util.h"
@@ -12,11 +15,33 @@
 #include "smokeviewvars.h"
 #include "IOvolsmoke.h"
 
+int       part_file_count;
+FILE_SIZE part_load_size;
+float     part_load_time;
+
+#ifdef pp_SLICETHREAD
+int       slice_file_count;
+FILE_SIZE slice_load_size;
+float     slice_load_time;
+#endif
+
+
 #ifdef WIN32
 #include <direct.h>
 #endif
 
-#define MENU_SMOKE3D_IBLANK -2
+#define PRINT_LOADTIMES(file_count,load_size,load_time) \
+  if(file_count>1){\
+    if(load_size>1000000000){\
+      PRINTF("Loaded %.1f GB in %.1f s\n",(float)load_size/1000000000.,load_time);\
+    }\
+    else if(load_size>1000000){\
+      PRINTF("Loaded %.1f MB in %.1f s\n",(float)load_size/1000000.,load_time);\
+    }\
+    else{\
+      PRINTF("Loaded %.0f kB in %.1f s\n",(float)load_size/1000.,load_time);\
+    }\
+  }
 
 #define MENU_KEEP_ALL -2
 #define MENU_KEEP_FINE -3
@@ -24,9 +49,13 @@
 
 #define MENU_SLICECOLORDEFER -5
 
+#define MENU_SLICE_FILE_SIZES -9
+
 #define MENU_OPTION_TRAINERMENU 2
 
-#define MENU_UPDATEBOUNDS -3
+#define MENU_UPDATEBOUNDS             -6
+#define MENU_BNDF_SHOW_MESH_INTERFACE -8
+
 
 #define MENU_DUMMY3 -2
 
@@ -34,6 +63,7 @@
 #define MENU_OVERWRITECOMPRESS 2
 #define MENU_COMPRESSNOW 3
 #define MENU_COMPRESSAUTOLOAD 4
+#define MENU_COMPRESS_SETTINGS 5
 
 #define MENU_TRAINER_CLEAR 998
 #define MENU_MAIN_QUIT 3
@@ -43,6 +73,7 @@
 #define MENU_WRITEINI 2
 #define MENU_WRITECASEINI 3
 #define MENU_READSVO 4
+#define MENU_CONFIG_SETTINGS 5
 
 #define MENU_DUMMY2 -1
 
@@ -58,7 +89,8 @@
 
 #define MENU_UNLOADSMOKE3D_UNLOADALLSOOT -1
 #define MENU_UNLOADSMOKE3D_UNLOADALLFIRE -2
-#define MENU_UNLOADSMOKE3D_UNLOADALLWATER -3
+#define MENU_UNLOADSMOKE3D_UNLOADALLTEMP -3
+#define MENU_UNLOADSMOKE3D_UNLOADALLCO2 -4
 
 #define MENU_UNLOADTERRAIN_UNLOADALL -10
 #define MENU_UNLOADTERRAIN_DUMMY -1
@@ -69,16 +101,23 @@
 
 #define MENU_LOADVSLICE_SHOWALL -20
 
+#define MENU_LOADVSLICE_SETTINGS -21
+#define MENU_ISO_SETTINGS         -3
+#define MENU_BOUNDARY_SETTINGS    -7
+#define MENU_PART_SETTINGS        -4
+#define MENU_PLOT3D_SETTINGS      -4
+#define MENU_VOLSMOKE_SETTINGS    -4
+#define MENU_SLICE_SETTINGS       -6
+#define MENU_PART_PARTFAST        -7
+
 #define MENU_EVAC_UNLOADALL -1
 #define MENU_EVAC_DUMMY -2
 
-#define MENU_PARTICLE_UNLOAD -1
+#define MENU_PARTICLE_UNLOAD_ALL -1
 #define MENU_PARTICLE_DUMMY -2
 #define MENU_PARTICLE_ALLMESHES -11
 
 #define MENU_UNLOADEVAC_UNLOADALL -1
-
-#define MENU_UNLOADPARTICLE_UNLOADALL -1
 
 #define MENU_AVATAR_DEFINED -1
 
@@ -132,6 +171,8 @@
 #define MENU_ZONE_FIRES 18
 #define MENU_ZONE_VENT_SLAB 19
 #define MENU_ZONE_VENT_PROFILE 20
+#define MENU_ZONE_WALLS 22
+#define MENU_ZONE_TARGETS 23
 
 #define MENU_SHOWSLICE_IN_GAS -16
 #define MENU_SHOWSLICE_IN_GASANDSOLID -17
@@ -160,6 +201,7 @@
 #define MENU_STARTUPVIEW -102
 #define MENU_OUTLINEVIEW -104
 #define MENU_SIZEPRESERVING -105
+#define MENU_VIEWPOINT_SETTINGS -107
 #define MENU_DUMMY -999
 
 #define MENU_SHOWHIDE_EVAC 13
@@ -239,6 +281,145 @@ void OpenSMVFile(char *filebuffer,int filebufferlength,int *openfile){
 }
 #endif
 
+/* ----------------------- ComparePatchLabels ----------------------------- */
+
+int ComparePatchLabels(const void *arg1, const void *arg2){
+  patchdata *patchi, *patchj;
+  char *labeli, *labelj;
+
+  patchi = *(patchdata **)arg1;
+  patchj = *(patchdata **)arg2;
+  labeli = patchi->label.longlabel;
+  labelj = patchj->label.longlabel;
+
+  return strcmp(labeli, labelj);
+}
+
+/* ----------------------- PrintFileSizes ----------------------------- */
+
+void PrintFileSizes(char *type, float val, float val2){
+  char label[100], label2[100], *labelptr, *labelptr2;
+
+  if(val>0.0)labelptr=GetFloatFileSizeLabel(val, label);
+  if(val2>0.0)labelptr2=GetFloatFileSizeLabel(val2, label2);
+  if(val>0.0){
+    if(val2>0.0){
+      printf("  %s/compressed: %s/%s\n", type,labelptr,labelptr2);
+    }
+    else{
+      printf("  %s: %s\n", type,labelptr);
+    }
+  }
+}
+/* ------------------ GetFileSizes ------------------------ */
+
+void GetFileSizes(void){
+  int i;
+
+  printf("\n");
+  if(nsmoke3dinfo>0){
+    float hrrpuv = 0.0, soot = 0.0, temp = 0.0, co2 = 0.0;
+    float hrrpuv2 = 0.0, soot2 = 0.0, temp2 = 0.0, co22 = 0.0;
+
+    for(i = 0; i<nsmoke3dinfo; i++){
+      smoke3ddata *smoke3di;
+      FILE_SIZE file_size, compressed_file_size;
+
+      smoke3di = smoke3dinfo+i;
+
+      file_size = GetFileSizeSMV(smoke3di->reg_file);
+      compressed_file_size = GetFileSizeSMV(smoke3di->comp_file);
+
+      switch(smoke3di->type){
+      case SOOT:
+        soot  += file_size;
+        soot2 += compressed_file_size;
+        break;
+      case HRRPUV:
+        hrrpuv  += file_size;
+        hrrpuv2 += compressed_file_size;
+        break;
+      case TEMP:
+        temp  += file_size;
+        temp2 += compressed_file_size;
+        break;
+      case CO2:
+        co2  += file_size;
+        co22 += compressed_file_size;
+        break;
+      default:
+        ASSERT(FFALSE);
+        break;
+      }
+    }
+    printf("3d smoke file sizes:\n");
+    PrintFileSizes("soot",soot,soot2);
+    PrintFileSizes("hrrpuv",hrrpuv,hrrpuv2);
+    PrintFileSizes("temp",temp,temp2);
+    PrintFileSizes("co2",co2,co22);
+  }
+  else{
+    printf("3d smoke file sizes: no files found\n");
+  }
+
+  printf("\n");
+  if(npartinfo>0){
+    float part = 0.0;
+    char label[100];
+
+    for(i = 0; i<npartinfo; i++){
+      partdata *parti;
+      FILE_SIZE file_size;
+
+      parti = partinfo+i;
+      file_size = GetFileSizeSMV(parti->file);
+      part += file_size;
+    }
+    printf("particle files: %s\n", GetFloatFileSizeLabel(part, label));
+  }
+  else{
+    printf("particle files: no files found\n");
+  }
+
+  printf("\n");
+  if(npatchinfo>0){
+    patchdata **patchlist;
+    float sum = 0.0, compressed_sum=0;
+
+    printf("boundary files sizes: \n");
+    NewMemory((void **)&patchlist, npatchinfo*sizeof(patchdata *));
+    for(i = 0; i<npatchinfo; i++){
+      patchlist[i] = patchinfo+i;
+    }
+    qsort((patchdata **)patchlist, (size_t)npatchinfo, sizeof(patchdata *), ComparePatchLabels);
+    for(i = 0; i<npatchinfo; i++){
+      patchdata *patchi, *patchim1;
+      FILE_SIZE file_size, compressed_file_size;
+
+      patchi = patchlist[i];
+      file_size = GetFileSizeSMV(patchi->reg_file);
+      compressed_file_size = GetFileSizeSMV(patchi->comp_file);
+
+      if(i>0)patchim1 = patchlist[i-1];
+      if(i==0||strcmp(patchim1->label.longlabel, patchi->label.longlabel)==0){
+        sum += file_size;
+        compressed_sum += compressed_file_size;
+      }
+      else{
+        PrintFileSizes(patchim1->label.longlabel,sum,compressed_sum);
+        sum = file_size;
+        compressed_sum = compressed_file_size;
+      }
+      if(i==npatchinfo-1){
+        PrintFileSizes(patchi->label.longlabel,sum,compressed_sum);
+      }
+    }
+  }
+  else{
+    printf("boundary files sizes: no files found\n");
+  }
+}
+
 /* ------------------ HideAllSmoke ------------------------ */
 
 void HideAllSmoke(void){
@@ -262,13 +443,13 @@ void HideAllSmoke(void){
 void HideAllSlices(void){
   int i;
 
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   for(i = 0; i < nsliceinfo; i++){
     sliceinfo[i].display = 0;
   }
   updatemenu = 1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
 /* ------------------ ShowAllSmoke ------------------------ */
@@ -298,7 +479,7 @@ void ShowMultiSliceMenu(int value){
   int i;
 
   updatemenu = 1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
   case SHOW_ALL:
   case HIDE_ALL:
@@ -323,26 +504,43 @@ void ShowMultiSliceMenu(int value){
     show_fed_area = 1 - show_fed_area;
     break;
   default:
-    mslicei = multisliceinfo + value;
-    mdisplay = 0;
-    if(islicetype == mslicei->type){
-      if(plotstate != DYNAMIC_PLOTS){
-        plotstate = DYNAMIC_PLOTS;
-        mdisplay = 1;
-      }
-      else{
-        mdisplay = 1 - mslicei->display;
-      }
+    if(value<=-20){
+      value = -20 - value;
+      ShowBoundaryMenu(value+1000);
     }
     else{
-      plotstate = DYNAMIC_PLOTS;
-      islicetype = mslicei->type;
-      mdisplay = 1;
-    }
-    for(i = 0; i < mslicei->nslices; i++){
-      sd = sliceinfo + mslicei->islices[i];
-      if(sd->loaded == 0)continue;
-      sd->display = mdisplay;
+      mslicei = multisliceinfo+value;
+      mdisplay = 0;
+      {
+        slicedata *sd;
+
+        sd = sliceinfo+mslicei->islices[0];
+        if(slicefile_labelindex==sd->slicefile_labelindex){
+          if(plotstate!=DYNAMIC_PLOTS){
+            plotstate = DYNAMIC_PLOTS;
+            mdisplay = 1;
+          }
+          else{
+            if(mslicei->display == -1){
+              mdisplay = 0;
+            }
+            else {
+              mdisplay = 1 - mslicei->display;
+            }
+          }
+        }
+        else{
+          plotstate = DYNAMIC_PLOTS;
+          sd = sliceinfo+mslicei->islices[0];
+          slicefile_labelindex = sd->slicefile_labelindex;
+          mdisplay = 1;
+        }
+      }
+      for(i = 0; i<mslicei->nslices; i++){
+        sd = sliceinfo+mslicei->islices[i];
+        if(sd->loaded==0)continue;
+        sd->display = mdisplay;
+      }
     }
     break;
   }
@@ -359,17 +557,20 @@ void ShowMultiSliceMenu(int value){
 void ShowAllSlices(char *type1, char *type2){
   int i;
 
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(trainer_showall_mslice == 1){
     for(i = 0; i < nsliceinfo; i++){
-      sliceinfo[i].display = 0;
-      if(sliceinfo[i].loaded == 0)continue;
+      slicedata *slicei;
+
+      slicei = sliceinfo + i;
+      slicei->display = 0;
+      if(slicei->loaded == 0)continue;
       if(
-        (type1 != NULL&&STRCMP(sliceinfo[i].label.longlabel, type1) == 0) ||
-        (type2 != NULL&&STRCMP(sliceinfo[i].label.longlabel, type2) == 0)
+        (type1 != NULL&&STRCMP(slicei->label.longlabel, type1) == 0) ||
+        (type2 != NULL&&STRCMP(slicei->label.longlabel, type2) == 0)
         ){
         sliceinfo[i].display = 1;
-        islicetype = sliceinfo[i].type;
+        slicefile_labelindex = slicei->slicefile_labelindex;
       }
     }
   }
@@ -398,8 +599,8 @@ void ShowAllSlices(char *type1, char *type2){
     ShowMultiSliceMenu(msliceindex);
   }
   updatemenu = 1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
 /* ------------------ TrainerViewMenu ------------------------ */
@@ -433,7 +634,7 @@ void TrainerViewMenu(int value){
     ASSERT(FFALSE);
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ MainMenu ------------------------ */
@@ -444,13 +645,13 @@ void MainMenu(int value){
     if(scriptoutstream!=NULL){
       ScriptMenu(SCRIPT_STOP_RECORDING);
     }
-    exit(0);
+    SMV_EXIT(0);
   }
   if(value==MENU_MAIN_TRAINERTOGGLE){
     trainer_mode=1-trainer_mode;
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ StaticVariableMenu ------------------------ */
@@ -461,25 +662,25 @@ void StaticVariableMenu(int value){
   plotstate=STATIC_PLOTS;
   visGrid=0;
   if(visiso==1){
-    updateshowstep(1,ISO);
+    UpdateShowStep(1,ISO);
   }
-  updatesurface();
+  UpdateSurface();
   if(visx_all==1){
-    updateshowstep(1,XDIR);
+    UpdateShowStep(1,XDIR);
   }
   if(visy_all==1){
-    updateshowstep(1,YDIR);
+    UpdateShowStep(1,YDIR);
   }
   if(visz_all==1){
-    updateshowstep(1,ZDIR);
+    UpdateShowStep(1,ZDIR);
   }
   if(visx_all==0&&visy_all==0&&visz_all==0){
-    updateshowstep(1,YDIR);
+    UpdateShowStep(1,YDIR);
   }
-  updateallplotslices();
+  UpdateAllPlotSlices();
   updatemenu=1;
-  glutPostRedisplay();
-  updateplot3dlistindex();
+  GLUTPOSTREDISPLAY;
+  UpdatePlot3dListIndex();
 }
 
 /* ------------------ IsoVariableMenu ------------------------ */
@@ -488,23 +689,23 @@ void IsoVariableMenu(int value){
   if(ReadPlot3dFile==1){
     plotn=value;
     if(visx_all==1){
-      updateshowstep(1,XDIR);
+      UpdateShowStep(1,XDIR);
     }
     if(visy_all==1){
-      updateshowstep(1,YDIR);
+      UpdateShowStep(1,YDIR);
     }
     if(visz_all==1){
-      updateshowstep(1,ZDIR);
+      UpdateShowStep(1,ZDIR);
     }
-    updateshowstep(1,ISO);
-    updatesurface();
+    UpdateShowStep(1,ISO);
+    UpdateSurface();
     plotstate=STATIC_PLOTS;
-    updateplotslice(XDIR);
-    updateplotslice(YDIR);
-    updateplotslice(ZDIR);
+    UpdatePlotSlice(XDIR);
+    UpdatePlotSlice(YDIR);
+    UpdatePlotSlice(ZDIR);
     updatemenu=1;
-    glutPostRedisplay();
-    updateplot3dlistindex();
+    GLUTPOSTREDISPLAY;
+    UpdatePlot3dListIndex();
   }
 }
 
@@ -513,28 +714,42 @@ void IsoVariableMenu(int value){
 void LabelMenu(int value){
   updatemenu=1;
   if(value == MENU_DUMMY)return;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
-  case MENU_LABEL_colorbar:
-    visColorbar=1-visColorbar;
+  case MENU_LABEL_SETTINGS:
+    ShowGluiDisplay(DIALOG_DISPLAY);
+    break;
+  case MENU_LABEL_colorbar_vertical:
+    visColorbarVertical   = 1 - visColorbarVertical;
+    if(visColorbarVertical==1)visColorbarHorizontal=0;
+
+    // vis_colorbar                        state
+    //    0/COLORBAR_HIDDEN                hidden
+    //    1/COLORBAR_SHOW_VERTICAL         vertical
+    //    2->max/COLORBAR_SHOW_HORIZONTAL  horizontal
+
+    vis_colorbar = GetColorbarState();
+    break;
+  case MENU_LABEL_colorbar_horizontal:
+    visColorbarHorizontal = 1 - visColorbarHorizontal;
+    if(visColorbarHorizontal==1)visColorbarVertical = 0;
+    vis_colorbar = GetColorbarState();
     break;
   case MENU_LABEL_timebar:
     visTimebar=1-visTimebar;
-    break;
-  case MENU_LABEL_title:
-    visTitle=1-visTitle;
-    break;
-  case MENU_LABEL_chid:
-    visCHID=1-visCHID;
     break;
   case MENU_LABEL_framerate:
     visFramerate = 1 - visFramerate;
     break;
    case MENU_LABEL_ShowAll:
     visUSERticks=1;
-    visColorbar=1;
+    visColorbarVertical=1;
+    visColorbarHorizontal=0;
     visTimebar=1;
-    visTitle=1;
+    vis_title_smv_version = 1;
+    vis_title_fds = 1;
+    vis_title_CHID = 1;
+    vis_title_gversion =1;
     visFramerate=1;
 #ifdef pp_memstatus
     visAvailmemory=1;
@@ -548,16 +763,19 @@ void LabelMenu(int value){
     if(ntickinfo>0)visFDSticks=1;
     visgridloc=1;
     visHRRlabel=1;
-    show_hrrcutoff=1;
+    show_firecutoff=1;
     visFramelabel=1;
     if(hrrinfo != NULL&&hrrinfo->display != 1)UpdateHrrinfo(1);
-    gversion=1;
     break;
    case MENU_LABEL_HideAll:
     visUSERticks=0;
-    visColorbar=0;
+    visColorbarVertical=0;
+    visColorbarHorizontal=0;
     visTimebar=0;
-    visTitle=0;
+    vis_title_smv_version = 0;
+    vis_title_fds = 0;
+    vis_title_CHID = 0;
+    vis_title_gversion =0;
     visFramerate=0;
     visaxislabels=0;
     visLabels=0;
@@ -565,12 +783,11 @@ void LabelMenu(int value){
     visFramelabel=0;
     visMeshlabel=0;
     visHRRlabel=0;
-    show_hrrcutoff=0;
+    show_firecutoff=0;
     if(hrrinfo != NULL&&hrrinfo->display != 0)UpdateHrrinfo(0);
     if(ntickinfo>0)visFDSticks=0;
     visgridloc=0;
     vis_slice_average=0;
-    gversion=0;
 #ifdef pp_memstatus
     visAvailmemory=0;
 #endif
@@ -580,7 +797,7 @@ void LabelMenu(int value){
      break;
    case MENU_LABEL_axis:
     visaxislabels = 1 - visaxislabels;
-    update_visaxislabels();
+    UpdateVisAxisLabels();
     break;
    case MENU_LABEL_textlabels:
      visLabels = 1 - visLabels;
@@ -627,14 +844,11 @@ void LabelMenu(int value){
      visHRRlabel=1-visHRRlabel;
      UpdateHrrinfo(visHRRlabel);
      break;
-   case MENU_LABEL_hrrcutoff:
-     show_hrrcutoff=1-show_hrrcutoff;
+   case MENU_LABEL_firecutoff:
+     show_firecutoff=1-show_firecutoff;
      break;
    case MENU_LABEL_userticks:
      visUSERticks = 1 - visUSERticks;
-     break;
-   case MENU_LABEL_gversion:
-     gversion=1-gversion;
      break;
    default:
      ASSERT(FFALSE);
@@ -654,14 +868,14 @@ void SmokeColorbarMenu(int value){
   fire_colorbar = colorbarinfo + value;
   UpdateRGBColors(COLORBAR_INDEX_NONE);
   if(FlowDir>0){
-    keyboard('-',FROM_SMOKEVIEW);
-    keyboard(' ',FROM_SMOKEVIEW);
+    Keyboard('-',FROM_SMOKEVIEW);
+    Keyboard(' ',FROM_SMOKEVIEW);
   }
   else{
-    keyboard(' ',FROM_SMOKEVIEW);
-    keyboard('-',FROM_SMOKEVIEW);
+    Keyboard(' ',FROM_SMOKEVIEW);
+    Keyboard('-',FROM_SMOKEVIEW);
   }
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ ColorbarMenu ------------------------ */
@@ -669,30 +883,38 @@ void SmokeColorbarMenu(int value){
 void ColorbarMenu(int value){
   if(value==MENU_DUMMY)return;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value<0){
     switch(value){
+    case MENU_COLORBAR_SETTINGS:
+      ShowGluiDisplay(DIALOG_COLORING);
+      break;
+    case COLORBAR_AUTOFLIP:
+      colorbar_autoflip = 1 - colorbar_autoflip;
+      update_flipped_colorbar = 1;
+      UpdateColorbarFlip();
+      break;
     case COLORBAR_FLIP:
-      colorbarflip=1-colorbarflip;
-      update_colorbarflip();
+      colorbar_flip=1-colorbar_flip;
+      UpdateColorbarFlip();
       break;
     case COLORBAR_RESET:
       show_extreme_mindata=0;
       show_extreme_maxdata=0;
-      colorbarflip=0;
+      colorbar_flip=0;
       contour_type=SHADED_CONTOURS;
       setbw=0;
-      update_extreme();
+      UpdateExtreme();
       UpdateRGBColors(COLORBAR_INDEX_NONE);
       break;
     case COLORBAR_HIGHLIGHT_BELOW:
       show_extreme_mindata=1-show_extreme_mindata;
-      update_extreme();
+      UpdateExtreme();
       UpdateRGBColors(COLORBAR_INDEX_NONE);
       break;
     case COLORBAR_HIGHLIGHT_ABOVE:
       show_extreme_maxdata=1-show_extreme_maxdata;
-      update_extreme();
+      UpdateExtreme();
       UpdateRGBColors(COLORBAR_INDEX_NONE);
       break;
     case COLORBAR_TOGGLE_BW_DATA:
@@ -704,18 +926,22 @@ void ColorbarMenu(int value){
       else{
         ColorbarMenu(colorbartype_save);
       }
-      IsoCB(ISO_COLORS);
+      IsoBoundCB(ISO_COLORS);
       break;
     case COLORBAR_TOGGLE_BW:
       setbw=1-setbw;
       InitRGB();
       SetLabelControls();
       break;
+    case USE_LIGHTING:
+      use_lighting = 1 - use_lighting;
+      UpdateUseLighting();
+      break;
    case COLORBAR_TRANSPARENT:
      use_transparency_data=1-use_transparency_data;
      UpdateRGBColors(COLORBAR_INDEX_NONE);
      SetLabelControls();
-     update_transparency();
+     UpdateTransparency();
      break;
    case COLORBAR_CONTINUOUS:
      contour_type=SHADED_CONTOURS;
@@ -729,6 +955,12 @@ void ColorbarMenu(int value){
      contour_type=LINE_CONTOURS;
      UpdateRGBColors(COLORBAR_INDEX_NONE);
      break;
+   case COLORBAR_HORIZONTAL:
+     LabelMenu(MENU_LABEL_colorbar_horizontal);
+     break;
+   case COLORBAR_VERTICAL:
+     LabelMenu(MENU_LABEL_colorbar_vertical);
+     break;
    default:
      ASSERT(FFALSE);
      break;
@@ -736,17 +968,21 @@ void ColorbarMenu(int value){
   }
   if(value>=0){
     colorbartype=value;
+    iso_colorbar_index=value;
+    iso_colorbar = colorbarinfo + iso_colorbar_index;
+    update_texturebar=1;
+    UpdateListIsoColorobar();
     selectedcolorbar_index2=colorbartype;
     UpdateCurrentColorbar(colorbarinfo+colorbartype);
-    update_colorbar_type();
-    update_colorbar_list2();
+    UpdateColorbarType();
+    UpdateColorbarList2();
     if(colorbartype == bw_colorbar_index){
       setbwdata = 1;
     }
     else{
       setbwdata = 0;
     }
-    IsoCB(ISO_COLORS);
+    IsoBoundCB(ISO_COLORS);
     SetLabelControls();
   }
   if(value>-10){
@@ -761,22 +997,28 @@ void Smoke3DShowMenu(int value){
   int i;
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value<0){
     switch(value){
     case SHOW_ALL:
       plotstate=DYNAMIC_PLOTS;
-      for(i=0;i<nsmoke3dinfo;i++){
-        smoke3di = smoke3dinfo + i;
-        if(smoke3di->loaded==1)smoke3di->display=1;
-      }
+      show_3dsmokefiles=1;
+      Smoke3DShowMenu(SET_SMOKE3D);
       break;
     case HIDE_ALL:
+      show_3dsmokefiles=0;
+      Smoke3DShowMenu(SET_SMOKE3D);
+      break;
+    case TOGGLE_SMOKE3D:
+      show_3dsmokefiles=1-show_3dsmokefiles;
+      Smoke3DShowMenu(SET_SMOKE3D);
+    break;
+    case SET_SMOKE3D:
       for(i=0;i<nsmoke3dinfo;i++){
         smoke3di = smoke3dinfo + i;
-        if(smoke3di->loaded==1)smoke3di->display=0;
+        if(smoke3di->loaded==1)smoke3di->display=show_3dsmokefiles;
       }
-      break;
+    break;
     default:
       ASSERT(FFALSE);
     }
@@ -813,14 +1055,14 @@ void IsoShowMenu(int value){
   case MENU_ISOSHOW_SOLID:
   case MENU_ISOSHOW_OUTLINE:
   case MENU_ISOSHOW_POINTS:
-    if(value == MENU_ISOSHOW_SOLID)show_iso_solid=1-show_iso_solid;
+    if(value == MENU_ISOSHOW_SOLID)show_iso_shaded=1-show_iso_shaded;
     if(value == MENU_ISOSHOW_OUTLINE)show_iso_outline = 1 - show_iso_outline;
-    if(value == MENU_ISOSHOW_POINTS)show_iso_verts = 1 - show_iso_verts;
-    visAIso=show_iso_solid*1+show_iso_outline*2+show_iso_verts*4;
+    if(value == MENU_ISOSHOW_POINTS)show_iso_points = 1 - show_iso_points;
+    visAIso=show_iso_shaded*1+show_iso_outline*2+show_iso_points*4;
     if(visAIso!=0){
       plotstate=DYNAMIC_PLOTS;
     }
-    update_glui_isotype();
+    UpdateGluiIsotype();
     break;
    case MENU_ISOSHOW_ALLSOLID:
     transparent_state=ALL_SOLID;
@@ -869,19 +1111,19 @@ void IsoShowMenu(int value){
     surfinfo[nsurfinfo+1+loaded_isomesh->nisolevels-1].transparent_level=1.0;
     break;
    case MENU_ISOSHOW_HIDEALL:
-    show_iso_solid=0;
+    show_iso_shaded=0;
     show_iso_outline=0;
-    show_iso_verts=0;
-    visAIso=show_iso_solid*1+show_iso_outline*2+show_iso_verts*4;
+    show_iso_points=0;
+    visAIso=show_iso_shaded*1+show_iso_outline*2+show_iso_points*4;
     for(i=0;i<nisolevels;i++){
       showlevels[i]=0;
     }
     break;
    case MENU_ISOSHOW_SHOWALL:
-    show_iso_solid=1;
+    show_iso_shaded=1;
     show_iso_outline=0;
-    show_iso_verts=0;
-    visAIso=show_iso_solid*1+show_iso_outline*2+show_iso_verts*4;
+    show_iso_points=0;
+    visAIso=show_iso_shaded*1+show_iso_outline*2+show_iso_points*4;
     for(i=0;i<nisolevels;i++){
       showlevels[i]=1;
     }
@@ -900,7 +1142,7 @@ void IsoShowMenu(int value){
      else{
        if(isoi->type==iisotype){
          isoi->display = 1 - isoi->display;
-         update_isotype();
+         UpdateIsoType();
        }
        else{
          isoi->display=1;
@@ -912,23 +1154,25 @@ void IsoShowMenu(int value){
     else if(value>=SHOWALL_ISO){
       if(value==SHOWALL_ISO){
         plotstate=DYNAMIC_PLOTS;
-        for(i=0;i<nisoinfo;i++){
-          isoinfo[i].display=1;
-        }
+        show_isofiles = 1;
       }
       else if(value==HIDEALL_ISO){
-        for(i=0;i<nisoinfo;i++){
-          isoinfo[i].display=0;
-        }
+        show_isofiles = 0;
       }
-     UpdateShow();
+      else if(value==TOGGLE_ISO){
+        show_isofiles = 1 - show_isofiles;
+      }
+      for(i=0;i<nisoinfo;i++){
+        isoinfo[i].display=show_isofiles;
+      }
+      UpdateShow();
     }
   }
-  update_iso_showlevels();
-  Update_Isotris(1);
+  UpdateIsoShowLevels();
+  UpdateIsoTriangles(1);
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ ShowVSliceMenu ------------------------ */
@@ -939,24 +1183,16 @@ void ShowVSliceMenu(int value){
 
   if(value == MENU_DUMMY)return;
   updatemenu = 1;
-  glutPostRedisplay();
-  if(value==SHOW_ALL){
+  GLUTPOSTREDISPLAY;
+  if(value==SHOW_ALL||value==GLUI_SHOWALL_VSLICE||value==GLUI_HIDEALL_VSLICE){
+    if(value == SHOW_ALL)showall_slices = 1 - showall_slices;
+    if(value == GLUI_SHOWALL_VSLICE)showall_slices = 1;
+    if(value == GLUI_HIDEALL_VSLICE)showall_slices = 0;
     for(i=0;i<nvsliceinfo;i++){
       vd = vsliceinfo+i;
       if(vd->loaded==0)continue;
-      vd->display=1;
+      vd->display= showall_slices;
     }
-    show_all_slices=1;
-    UpdateTimes();
-    return;
-  }
-  if(value==HIDE_ALL){
-    for(i=0;i<nvsliceinfo;i++){
-      vd = vsliceinfo+i;
-      if(vd->loaded==0)continue;
-      vd->display=0;
-    }
-    show_all_slices=0;
     UpdateTimes();
     return;
   }
@@ -988,7 +1224,7 @@ void ShowVSliceMenu(int value){
     return;
   }
   vd = vsliceinfo + value;
-  if(islicetype==sliceinfo[vd->ival].type){
+  if(slicefile_labelindex==sliceinfo[vd->ival].slicefile_labelindex){
     if(plotstate!=DYNAMIC_PLOTS){
       plotstate=DYNAMIC_PLOTS;
       vd->display=1;
@@ -1022,7 +1258,7 @@ void ShowVSliceMenu(int value){
     }
   }
   else{
-    islicetype = sliceinfo[vd->ival].type;
+    slicefile_labelindex = sliceinfo[vd->ival].slicefile_labelindex;
     vd->display=1;
   }
   plotstate=GetPlotState(DYNAMIC_PLOTS);
@@ -1036,20 +1272,18 @@ void ShowHideSliceMenu(int value){
 
   if(value == MENU_DUMMY)return;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value<0){
     switch(value){
+    case GLUI_HIDEALL:
+    case GLUI_SHOWALL:
     case SHOW_ALL:
+      if(value == GLUI_SHOWALL)showall_slices = 1;
+      if(value == GLUI_HIDEALL)showall_slices = 0;
+      if(value == SHOW_ALL)showall_slices = 1-showall_slices;
       for(i=0;i<nsliceinfo;i++){
-        sliceinfo[i].display=1;
+        sliceinfo[i].display=showall_slices;
       }
-      show_all_slices=1;
-      break;
-    case HIDE_ALL:
-      for(i=0;i<nsliceinfo;i++){
-        sliceinfo[i].display=0;
-      }
-      show_all_slices=0;
       break;
     case MENU_SHOWSLICE_IN_GAS:
       show_slice_in_obst = ONLY_IN_GAS;
@@ -1079,14 +1313,17 @@ void ShowHideSliceMenu(int value){
       show_cell_slices_and_vectors=1-show_cell_slices_and_vectors;
       return;
     default:
-      ASSERT(FFALSE);
+      if(value<=-20){
+        value = -20 - value;
+        ShowBoundaryMenu(value+1000);
+      }
     }
   }
   else{
     slicedata *sd;
 
     sd = sliceinfo + value;
-    if(islicetype==sd->type){
+    if(slicefile_labelindex==sd->slicefile_labelindex){
       if(plotstate!=DYNAMIC_PLOTS){
         plotstate=DYNAMIC_PLOTS;
         sd->display=1;
@@ -1097,7 +1334,7 @@ void ShowHideSliceMenu(int value){
     }
     else{
       plotstate=DYNAMIC_PLOTS;
-      islicetype = sd->type;
+      slicefile_labelindex = sd->slicefile_labelindex;
       sd->display=1;
     }
     if(value < nsliceinfo - nfedinfo){
@@ -1118,6 +1355,7 @@ void ShowHideSliceMenu(int value){
       }
     }
   }
+  update_flipped_colorbar = 1;
   UpdateSliceFilenum();
   plotstate=GetPlotState(DYNAMIC_PLOTS);
 
@@ -1131,7 +1369,7 @@ void ShowHideSliceMenu(int value){
 void ShowHideMenu(int value){
   if(value==MENU_DUMMY)return;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
 #ifdef pp_MEMPRINT
   case MENU_SHOWHIDE_PRINT:
@@ -1143,6 +1381,8 @@ void ShowHideMenu(int value){
    UpdateRGBColors(COLORBAR_INDEX_NONE);
    SetLabelControls();
    SetColorControls();
+   UpdateBackgroundFlip(background_flip);
+   UpdateBackgroundFlip2(background_flip);
    break;
   case MENU_SHOWHIDE_EVAC:
     if(plotstate==DYNAMIC_PLOTS){
@@ -1189,7 +1429,7 @@ void ShowHideMenu(int value){
 void ViewpointMenu(int value){
   if(value==MENU_DUMMY)return;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
   case TOGGLE_TITLE_SAFE:
     if(titlesafe_offset==0){
@@ -1208,16 +1448,16 @@ void ViewpointMenu(int value){
 /* ------------------ DialogMenu ------------------------ */
 
 void DialogMenu(int value){
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
   case DIALOG_SHOOTER:
-    show_glui_shooter();
+    ShowGluiShooter();
     break;
   case DIALOG_TRAINER:
-    show_glui_trainer();
+    ShowGluiTrainer();
     break;
   case DIALOG_DEVICE:
-    show_glui_device();
+    ShowGluiDevice();
     break;
   case DIALOG_3DSMOKE:
   case DIALOG_AUTOLOAD:
@@ -1227,7 +1467,7 @@ void DialogMenu(int value){
   case DIALOG_SHOWFILES:
   case DIALOG_SMOKEZIP:
   case DIALOG_TIME:
-    show_glui_bounds(value);
+    ShowGluiBounds(value);
     break;
   case DIALOG_MOTION:
   case DIALOG_RENDER:
@@ -1242,27 +1482,30 @@ void DialogMenu(int value){
   case DIALOG_FONTS:
   case DIALOG_LABELS:
   case DIALOG_DISPLAY:
-    show_glui_display(value);
+    ShowGluiDisplay(value);
     break;
-  case DIALOG_TOUR:
-   show_glui_tour();
-   break;
+  case DIALOG_TOUR_SHOW:
+    ShowGluiTour();
+    break;
+  case DIALOG_TOUR_HIDE:
+    HideGluiTour();
+    break;
   case DIALOG_CLIP:
-    show_glui_clip();
+    ShowGluiClip();
     break;
   case DIALOG_STEREO:
-    show_glui_stereo();
+    ShowGluiStereo();
     break;
   case DIALOG_WUI:
-    show_glui_wui();
+    ShowGluiWui();
     break;
   case DIALOG_COLORBAR:
     showcolorbar_dialog=1-showcolorbar_dialog;
     if(showcolorbar_dialog==1){
-      show_glui_colorbar();
+      ShowGluiColorbar();
     }
     if(showcolorbar_dialog==0){
-      hide_glui_colorbar();
+      HideGluiColorbar();
     }
     break;
   case DIALOG_GEOMETRY:
@@ -1275,30 +1518,32 @@ void DialogMenu(int value){
         updategetobstlabels=0;
       }
       visBlocksSave=visBlocks;
-      show_glui_geometry();
+      ShowGluiGeometry();
       visBlocks=visBLOCKNormal;
     }
     if(showedit_dialog==0){
-      hide_glui_geometry();
+      HideGluiGeometry();
       visBlocks=visBlocksSave;
     }
-    update_trainer_outline();
-
+    UpdateTrainerOutline();
+    break;
+  case DIALOG_SHRINKALL:
+    ShrinkDialogs();
     break;
   case DIALOG_HIDEALL:
     showcolorbar_dialog = 0;
-    hide_glui_shooter();
-    hide_glui_display();
-    hide_glui_bounds();
+    HideGluiShooter();
+    HideGluiDisplay();
+    HideGluiBounds();
     HideGluiMotion();
-    hide_glui_tour();
-    hide_glui_clip();
-    hide_glui_wui();
-    hide_glui_stereo();
-    hide_glui_colorbar();
+    HideGluiTour();
+    HideGluiClip();
+    HideGluiWui();
+    HideGluiStereo();
+    HideGluiColorbar();
     if(showedit_dialog==1)DialogMenu(DIALOG_GEOMETRY);
-    hide_glui_trainer();
-    hide_glui_device();
+    HideGluiTrainer();
+    HideGluiDevice();
     break;
   default:
     ASSERT(FFALSE);
@@ -1313,7 +1558,7 @@ void ZoomMenu(int value){
   if(value==MENU_DUMMY)return;
   updatemenu=1;
   if(opengldefined==1){
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
   zoomindex=value;
   if(zoomindex==-1){
@@ -1321,11 +1566,11 @@ void ZoomMenu(int value){
       zoom=zooms[0];
       zoomindex=0;
     }
-    if(zoom>zooms[4]){
-      zoom=zooms[4];
-      zoomindex=4;
+    if(zoomindex!=MAX_ZOOMS&&zoom>zooms[MAX_ZOOMS-1]){
+      zoom=zooms[MAX_ZOOMS-1];
+      zoomindex=MAX_ZOOMS-1;
     }
-    if(projection_type!=0){
+    if(projection_type!= PROJECTION_PERSPECTIVE){
       camera_current->projection_type=projection_type;
       SetViewPoint(RESTORE_EXTERIOR_VIEW);
       UpdateProjectionType();
@@ -1334,19 +1579,16 @@ void ZoomMenu(int value){
   else if(zoomindex==UPDATE_PROJECTION){
     camera_current->projection_type=projection_type;
     UpdateProjectionType();
-    if(projection_type==0){
-      UpdateCameraYpos(camera_current);
-    }
-    else{
+    UpdateCameraYpos(camera_current);
+    if(projection_type== PROJECTION_ORTHOGRAPHIC){
       camera_current->eye[1]=camera_current->isometric_y;
     }
-
   }
   else{
-    if(zoomindex<0)zoomindex=2;
-    if(zoomindex>4)zoomindex=2;
+    if(zoomindex<0)zoomindex=ZOOMINDEX_ONE;
+    if(zoomindex>MAX_ZOOMS)zoomindex=ZOOMINDEX_ONE;
     zoom=zooms[zoomindex];
-    if(projection_type!=0){
+    if(projection_type!= PROJECTION_PERSPECTIVE){
       SetViewPoint(RESTORE_EXTERIOR_VIEW_ZOOM);
       camera_current->projection_type=projection_type;
       UpdateProjectionType();
@@ -1361,7 +1603,7 @@ void ZoomMenu(int value){
 void ApertureMenu(int value){
   updatemenu=1;
   if(opengldefined==1){
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
   apertureindex = CLAMP(value, 0, 4);
   aperture=apertures[apertureindex];
@@ -1372,9 +1614,12 @@ void ApertureMenu(int value){
 void FontMenu(int value){
   updatemenu=1;
   if(opengldefined==1){
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
   switch(value){
+  case MENU_FONT_SETTINGS:
+    ShowGluiDisplay(DIALOG_FONTS);
+    break;
   case SMALL_FONT:
     fontindex=SMALL_FONT;
     large_font=GLUT_BITMAP_HELVETICA_12;
@@ -1395,7 +1640,7 @@ void FontMenu(int value){
   default:
     ASSERT(FFALSE);
   }
-  glui_update_fontindex();
+  GluiUpdateFontIndex();
   SetLabelControls();
 }
 
@@ -1422,7 +1667,7 @@ void UnitsMenu(int value){
     show_all_units = 1 - show_all_units;
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ OptionMenu ------------------------ */
@@ -1430,11 +1675,11 @@ void UnitsMenu(int value){
 void OptionMenu(int value){
   if(value==MENU_DUMMY)return;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value == MENU_OPTION_TRAINERMENU){
     trainer_mode=1;
     if(showtrainer_dialog==0){
-      show_glui_trainer();
+      ShowGluiTrainer();
     }
     FontMenu(LARGE_FONT);
   }
@@ -1463,9 +1708,12 @@ void ResetMenu(int value){
 
   if(value==MENU_DUMMY)return;
   switch(value){
+  case MENU_VIEWPOINT_SETTINGS:
+    ShowGluiMotion(DIALOG_VIEW);
+    break;
   case MENU_SIZEPRESERVING:
     projection_type = 1 - projection_type;
-    Motion_CB(PROJECTION);
+    SceneMotionCB(PROJECTION);
     break;
   case MENU_OUTLINEVIEW:
     if(visBlocks==visBLOCKOutline){
@@ -1513,14 +1761,16 @@ void ResetMenu(int value){
   //updatezoommenu=1; // updating zoom causes a bug when restoring views from the menu
                       // kept commented code in for future reference
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ RenderState ------------------------ */
 
 void RenderState(int onoff){
   if(onoff==RENDER_ON){
-    rendering_status = onoff;
+    if(render_status == RENDER_ON)return;
+    render_status = RENDER_ON;
+    render_firsttime = YES;
     update_screeninfo = 1;
     saveW=screenWidth;
     saveH=screenHeight;
@@ -1537,13 +1787,26 @@ void RenderState(int onoff){
     }
   }
   else{
-    if(rendering_status==RENDER_OFF)return;
-    rendering_status = onoff;
+    int width_low, height_low, width_high, height_high;
+
+    if(render_status==RENDER_OFF)return;
+    render_status = RENDER_OFF;
+    render_firsttime = NO;
     Enable360Zoom();
-    render_mode = RENDER_XYSINGLE;
-    setScreenSize(&saveW,&saveH);
+    SetScreenSize(&saveW,&saveH);
     ResizeWindow(screenWidth,screenHeight);
+    ResetRenderResolution(&width_low, &height_low, &width_high, &height_high);
+    UpdateRenderRadioButtons(width_low, height_low, width_high, height_high);
   }
+}
+
+/* ------------------ SkipMenu ------------------------ */
+
+void SkipMenu(int value){
+  render_skip=value;
+  GLUTPOSTREDISPLAY;
+  updatemenu=1;
+  UpdateRenderListSkip();
 }
 
 /* ------------------ RenderMenu ------------------------ */
@@ -1553,17 +1816,21 @@ void RenderMenu(int value){
   int i,n;
   meshdata *meshi;
 
+  if(value==MENU_DUMMY)return;
   updatemenu=1;
   if(value>=11000)return;
   if(opengldefined==1){
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
   if(value>=10000&&value<=10005){
-    nrender_rows=value-10000;
-    UpdateNRenderRows();
+    resolution_multiplier=value-10000;
+    UpdateResolutionMultiplier();
     return;
   }
   switch(value){
+  case MENU_RENDER_SETTINGS:
+    ShowGluiMotion(DIALOG_RENDER);
+    break;
   case RenderCustom:
     render_window_size = value;
     renderW = script_render_width;
@@ -1589,23 +1856,113 @@ void RenderMenu(int value){
     render_size_index=value;
     break;
   case RENDER_CURRENT_SINGLE:
-    render_from_menu=1;
-    keyboard('r',FROM_SMOKEVIEW);
+    Keyboard('r',FROM_SMOKEVIEW);
      break;
   case RENDER_CURRENT_360:
     LabelMenu(MENU_LABEL_HideAll);
     GetViewportInfo();
     RenderMenu(RENDER_CURRENT_SINGLE);
-    render_from_menu = 1;
-    keyboard('R', FROM_SMOKEVIEW);
+    Keyboard('R', FROM_SMOKEVIEW_ALT);
     break;
   case RENDER_CURRENT_MULTIPLE:
-    if(nrender_rows==1)RenderMenu(RENDER_CURRENT_SINGLE);
-    render_from_menu=1;
-    keyboard('R',FROM_SMOKEVIEW);
+    if(resolution_multiplier==1){
+      RenderMenu(RENDER_CURRENT_SINGLE);
+      return;
+    }
+    Keyboard('R',FROM_SMOKEVIEW);
+    break;
+  case RenderJSON:
+  case RenderJSONALL:
+    {
+      int json_option;
+
+      json_option = HTML_CURRENT_TIME;
+      if(value==RenderJSONALL)json_option = HTML_ALL_TIMES;
+      if(Obst2Data(htmlobst_filename)!=0){
+        printf("blockage data output to %s\n", htmlobst_filename);
+      }
+      else{
+        printf("no blockage data to output\n");
+      }
+      if(SliceNode2Data(htmlslicenode_filename, json_option)!=0){
+        printf("node centered slice file data output to %s\n", htmlslicenode_filename);
+      }
+      else{
+        printf("no node centered slice file data to output\n");
+      }
+      if(SliceCell2Data(htmlslicecell_filename, json_option)!=0){
+        printf("cell centered slice file data output to %s\n", htmlslicecell_filename);
+      }
+      else{
+        printf("no cell centered slice file data to output\n");
+      }
+      break;
+    }
+    break;
+  case RenderHTML:
+    Smv2Html(html_filename,   HTML_CURRENT_TIME, FROM_SMOKEVIEW, VR_NO);
+    Smv2Html(htmlvr_filename, HTML_CURRENT_TIME, FROM_SMOKEVIEW, VR_YES);
+    break;
+  case RenderHTMLALL:
+    Smv2Html(html_filename,   HTML_ALL_TIMES, FROM_SMOKEVIEW, VR_NO);
+    Smv2Html(htmlvr_filename, HTML_ALL_TIMES, FROM_SMOKEVIEW, VR_YES);
     break;
   case RenderCancel:
     RenderState(RENDER_OFF);
+    break;
+  case Render360:
+    render_mode = 1-render_mode;
+    updatemenu = 1;
+    break;
+  case RenderStart360:
+    RenderCB(RENDER_START_360);
+    break;
+  case RenderStartORIGRES:
+    render_mode = RENDER_NORMAL;
+    resolution_multiplier=1;
+    RenderMenu(RenderStart);
+    break;
+  case RenderStartHIGHRES:
+    render_mode = RENDER_NORMAL;
+    resolution_multiplier=glui_resolution_multiplier;
+    RenderMenu(RenderStart);
+    break;
+  case RenderStart:
+    if(RenderTime==0&&touring==0){
+      RenderMenu(RENDER_CURRENT_MULTIPLE);
+      return;
+    }
+    if(touring==1){
+      rendertourcount=0;
+    }
+    if(render_skip == RENDER_CURRENT_SINGLE){
+      UpdateFrameNumber(0);
+    }
+    else{
+      if(stept == 0)Keyboard('t', FROM_SMOKEVIEW);
+      ResetItimes0();
+      for(i=0;i<nsliceinfo;i++){
+        sd=sliceinfo+i;
+        sd->itime=0;
+      }
+      frame_index=first_frame_index;
+      for(i=0;i<nmeshes;i++){
+        meshi=meshinfo+i;
+        meshi->patch_itime=0;
+      }
+    }
+    RenderState(RENDER_ON);
+    UpdateTimeLabels();
+    FlowDir=1;
+    for(n=0;n<nglobal_times;n++){
+      render_frame[n]=0;
+    }
+    if(scriptoutstream!=NULL){
+      fprintf(scriptoutstream,"RENDERALL\n");
+      fprintf(scriptoutstream," %i\n",render_skip);
+      fprintf(scriptoutstream,"\n");
+    }
+    render_times = RENDER_ALLTIMES;
     break;
   case RenderLABELframenumber:
     render_label_type=RENDER_LABEL_FRAMENUM;
@@ -1624,39 +1981,10 @@ void RenderMenu(int value){
      updatemenu=1;
      break;
   default:
-    if(RenderTime==0&&touring==0)return;
-    if(touring==1){
-      rendertourcount=0;
-    }
-    if(stept==0){
-      keyboard('t',FROM_SMOKEVIEW);
-    }
-    RenderState(RENDER_ON);
-    ResetItimes0();
-    for(i=0;i<nsliceinfo;i++){
-      sd=sliceinfo+i;
-      sd->itime=0;
-    }
-    frame_index=first_frame_index;
-    for(i=0;i<nmeshes;i++){
-      meshi=meshinfo+i;
-      meshi->patch_itime=0;
-    }
-    UpdateTimeLabels();
-    RenderSkip=value;
-    FlowDir=1;
-    for(n=0;n<nglobal_times;n++){
-      render_frame[n]=0;
-    }
-    if(scriptoutstream!=NULL){
-      fprintf(scriptoutstream,"RENDERALL\n");
-      fprintf(scriptoutstream," %i\n",RenderSkip);
-      fprintf(scriptoutstream,"\n");
-    }
-    render_times = RENDER_ALLTIMES;
-    break;
+     ASSERT(FFALSE);
+     break;
   }
-  UpdateNRenderRows();
+  UpdateResolutionMultiplier();
 }
 
 /* ------------------ EvacShowMenu ------------------------ */
@@ -1673,7 +2001,7 @@ void EvacShowMenu(int value){
     parti = partinfo + value;
     parti->display = 1 - parti->display;
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
     plotstate=GetPlotState(DYNAMIC_PLOTS);
     return;
   }
@@ -1717,8 +2045,7 @@ void EvacShowMenu(int value){
   }
   updatemenu=1;
   plotstate=GetPlotState(DYNAMIC_PLOTS);
-  glutPostRedisplay();
-
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ ParticleShowMenu ------------------------ */
@@ -1735,7 +2062,7 @@ void ParticleShowMenu(int value){
     parti = partinfo + value;
     parti->display = 1 - parti->display;
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
     plotstate=GetPlotState(DYNAMIC_PLOTS);
     return;
   }
@@ -1832,7 +2159,7 @@ void ParticleShowMenu(int value){
   }
   updatemenu=1;
   plotstate=GetPlotState(DYNAMIC_PLOTS);
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 #define MENU_FRAMERATE_Realtime 2001
@@ -1871,16 +2198,16 @@ void FrameRateMenu(int value){
     if(global_times==NULL&&realtime_flag!=0)updateUpdateFrameRateMenu=1;
   }
   else{
-    keyboard('t',FROM_SMOKEVIEW);
+    Keyboard('t',FROM_SMOKEVIEW);
     RenderState(RENDER_OFF);
     FlowDir=1;
   }
   frameratevalue=value;
   updatemenu=1;
   if(opengldefined==1){
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
-  reset_gltime();
+  ResetGLTime();
 }
 
 /* ------------------ IsoSurfaceTypeMenu ------------------------ */
@@ -1906,9 +2233,9 @@ void IsoSurfaceTypeMenu(int value){
       ASSERT(FFALSE);
       break;
     }
-    update_glui_plot3dtype();
+    UpdateGluiPlot3Dtype();
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
 }
 
@@ -1917,9 +2244,9 @@ void IsoSurfaceTypeMenu(int value){
 void IsoSurfaceMenu(int value){
   if(ReadPlot3dFile==1){
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
     if(value==1){
-      updateshowstep(0,ISO);
+      UpdateShowStep(0,ISO);
     }
     if(value==2){
       p3dsurfacesmooth = 1 - p3dsurfacesmooth;
@@ -1932,15 +2259,17 @@ void IsoSurfaceMenu(int value){
 void LevelMenu(int value){
   if(ReadPlot3dFile==1){
     plotiso[plotn-1]=value;
-    updateshowstep(1,ISO);
-    updatesurface();
+    UpdateShowStep(1,ISO);
+    UpdateSurface();
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
 }
 
+/* ------------------ OpenUrl ------------------------ */
+
 #ifdef pp_OSX
-void openurl(char *url){
+void OpenUrl(char *url){
   char command[1000];
 
   strcpy(command,"open ");
@@ -1949,7 +2278,7 @@ void openurl(char *url){
 }
 #endif
 #ifdef pp_LINUX
-void openurl(char *url){
+void OpenUrl(char *url){
   char command[1000];
 
   strcpy(command,"xdg-open ");
@@ -1964,7 +2293,7 @@ void openurl(char *url){
 #ifdef WIN32
 #define OPENURL(url) ShellExecute(NULL,"open", url,NULL,NULL,SW_SHOWNORMAL)
 #else
-#define OPENURL(url) openurl(url)
+#define OPENURL(url) OpenUrl(url)
 #endif
 
 void HelpMenu(int value){
@@ -2003,13 +2332,13 @@ void VectorSkipMenu(int value){
     visVector=1-visVector;
     if(vectorspresent==0)visVector=0;
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
     return;
   }
   vectorskip=value;
   visVector=1;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ TextureShowMenu ------------------------ */
@@ -2025,7 +2354,7 @@ void TextureShowMenu(int value){
     texti = textureinfo + value;
     texti->display = 1-texti->display;
     if(texti->display==1)texturedisplay=1;
-    for(i=0;i<ntextures;i++){
+    for(i=0;i<ntextureinfo;i++){
       texti = textureinfo + i;
       if(texti->loaded==0||texti->used==0)continue;
       if(texti->display==0){
@@ -2039,7 +2368,7 @@ void TextureShowMenu(int value){
   else{
     switch(value){
     case MENU_TEXTURE_SHOWALL:
-      for(i=0;i<ntextures;i++){
+      for(i=0;i<ntextureinfo;i++){
         texti = textureinfo + i;
         if(texti->loaded==0||texti->used==0)continue;
         texti->display=1;
@@ -2048,7 +2377,7 @@ void TextureShowMenu(int value){
       showall_textures=1;
       break;
     case MENU_TEXTURE_HIDEALL:
-      for(i=0;i<ntextures;i++){
+      for(i=0;i<ntextureinfo;i++){
         texti = textureinfo + i;
         if(texti->loaded==0||texti->used==0)continue;
         texti->display=0;
@@ -2068,8 +2397,13 @@ void TextureShowMenu(int value){
       texturedata *textii=NULL;
 
       geomi = geominfo + i;
-      surf = geomi->surf;
-      if(surf!=NULL)textii=surf->textureinfo;
+      surf = geomi->surfgeom;
+      if(terrain_texture!=NULL){
+        textii = terrain_texture;
+      }
+      else{
+        if(surf!=NULL)textii = surf->textureinfo;
+      }
       if(textii!=NULL&&textii->display==1){
         visGeomTextures=1;
         break;
@@ -2080,7 +2414,7 @@ void TextureShowMenu(int value){
     }
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 
 }
 
@@ -2089,8 +2423,10 @@ void TextureShowMenu(int value){
 void Plot3DShowMenu(int value){
   int i;
 
-  if(value==MENU_PLOT3D_DUMMY)return;
   switch(value){
+  case MENU_PLOT3D_DUMMY:
+    return;
+    break;
   case MENU_PLOT3D_Z:
       visz_all=1-visz_all;
       break;
@@ -2126,13 +2462,20 @@ void Plot3DShowMenu(int value){
       plotstate=DYNAMIC_PLOTS;
       break;
    case HIDEALL_PLOT3D:
-     for(i=0;i<nplot3dinfo;i++){
-       if(plot3dinfo[i].loaded==1)plot3dinfo[i].display=0;
-     }
+     show_plot3dfiles = 0;
+     Plot3DShowMenu(DISPLAY_PLOT3D);
      break;
    case SHOWALL_PLOT3D:
+     show_plot3dfiles = 1;
+     Plot3DShowMenu(DISPLAY_PLOT3D);
+     break;
+   case TOGGLESHOW_PLOT3D:
+     show_plot3dfiles = 1 - show_plot3dfiles;
+     Plot3DShowMenu(DISPLAY_PLOT3D);
+     break;
+   case DISPLAY_PLOT3D:
      for(i=0;i<nplot3dinfo;i++){
-       if(plot3dinfo[i].loaded==1)plot3dinfo[i].display=1;
+       if(plot3dinfo[i].loaded==1)plot3dinfo[i].display=show_plot3dfiles;
      }
      break;
    default:
@@ -2148,10 +2491,10 @@ void Plot3DShowMenu(int value){
   }
   plotstate=GetPlotState(STATIC_PLOTS);
   if(plotstate==STATIC_PLOTS&&visiso==1){
-    updatesurface();
+    UpdateSurface();
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 
@@ -2227,7 +2570,7 @@ void GridSliceMenu(int value){
     break;
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 #ifdef pp_COMPRESS
@@ -2237,16 +2580,19 @@ void GridSliceMenu(int value){
 void CompressMenu(int value){
   if(value==MENU_DUMMY)return;
   switch(value){
+  case MENU_CONFIG_SETTINGS:
+    ShowGluiBounds(DIALOG_SMOKEZIP);
+    break;
   case MENU_ERASECOMPRESS:
     erase_all=1;
     overwrite_all=0;
-    update_overwrite();
+    UpdateOverwrite();
     CompressSVZip();
     break;
   case MENU_OVERWRITECOMPRESS:
     erase_all=0;
     overwrite_all=1-overwrite_all;
-    update_overwrite();
+    UpdateOverwrite();
     break;
   case MENU_COMPRESSNOW:
     erase_all=0;
@@ -2254,7 +2600,7 @@ void CompressMenu(int value){
     break;
   case MENU_COMPRESSAUTOLOAD:
     compress_autoloaded=1-compress_autoloaded;
-    update_overwrite();
+    UpdateOverwrite();
     break;
   default:
     ASSERT(FFALSE);
@@ -2269,18 +2615,18 @@ void CompressMenu(int value){
 
 void IniSubMenu(int value){
   if(value==MENU_READCASEINI){
-    ReadINI(NULL);
+    ReadIni(NULL);
   }
   else{
     char *ini_filename;
     char *script_filename2;
 
-    ini_filename = get_inifilename(value);
+    ini_filename = GetIniFileName(value);
     if(ini_filename==NULL||strlen(ini_filename)==0)return;
     script_filename2=script_filename;
     strcpy(script_filename,ini_filename);
     windowresized=0;
-    ReadINI(script_filename2);
+    ReadIni(script_filename2);
   }
 }
 
@@ -2289,33 +2635,37 @@ void IniSubMenu(int value){
 void SmokeviewIniMenu(int value){
   switch(value){
   case MENU_READINI:
-    ReadINI(NULL);
+    ReadIni(NULL);
     UpdateRGBColors(COLORBAR_INDEX_NONE);
     break;
   case MENU_WRITEINI:
-    WriteINI(GLOBAL_INI,NULL);
+    WriteIni(GLOBAL_INI,NULL);
     break;
   case MENU_WRITECASEINI:
-    WriteINI(LOCAL_INI,NULL);
+    WriteIni(LOCAL_INI,NULL);
     break;
   case MENU_READSVO:
-    init_object_defs();
+    InitObjectDefs();
     break;
   case MENU_DUMMY:
+    break;
+  case MENU_CONFIG_SETTINGS:
+    ShowGluiBounds(DIALOG_CONFIG);
     break;
   default:
     ASSERT(FFALSE);
     break;
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ PeriodicReloads ------------------------ */
 
 void PeriodicReloads(int value){
   if(periodic_reloads!=0){
-    LoadUnloadMenu(RELOADALL);
+    if(load_incremental==1)LoadUnloadMenu(RELOAD_INCREMENTAL_ALL);
+    if(load_incremental==0)LoadUnloadMenu(RELOADALL);
     glutTimerFunc((unsigned int)value,PeriodicReloads,value);
   }
 }
@@ -2338,37 +2688,37 @@ void ScriptMenu(int value){
 
   if(value==MENU_DUMMY)return;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
-    case SCRIPT_FILE_LOADING:
-      defer_file_loading = 1 - defer_file_loading;
-      update_defer();
+    case MENU_SCRIPT_SETTINGS:
+      ShowGluiBounds(DIALOG_SCRIPT);
       break;
     case SCRIPT_STEP:
       script_step=1-script_step;
       break;
     case SCRIPT_CANCEL:
+      script_defer_loading = 0;
+      iso_multithread = iso_multithread_save;
       current_script_command=NULL;
       runscript=0;
       first_frame_index=0;
-      skip_render_frames=0;
       script_startframe=-1;
       script_skipframe=-1;
       script_step=0;
-      glui_script_enable();
+      GluiScriptEnable();
       break;
     case SCRIPT_CONTINUE:
       script_step=0;
       break;
     case SCRIPT_START_RECORDING2:
-      defer_file_loading = 1;
-      update_defer();
       ScriptMenu(SCRIPT_START_RECORDING);
+      script_defer_loading = 1;
       break;
     case SCRIPT_START_RECORDING:
-      update_script_start();
-      get_newscriptfilename(newscriptfilename);
-      script_recording = insert_scriptfile(newscriptfilename);
+      script_defer_loading = 0;
+      UpdateScriptStart();
+      GetNewScriptFileName(newscriptfilename);
+      script_recording = InsertScriptFile(newscriptfilename);
       scriptoutstream=fopen(newscriptfilename,"w");
       if(scriptoutstream!=NULL){
         PRINTF("Script recorder on\n");
@@ -2413,7 +2763,7 @@ void ScriptMenu(int value){
         scriptoutstream=NULL;
         PRINTF("Script recorder off\n");
       }
-      update_script_stop();
+      UpdateScriptStop();
       break;
     default:
       for(scriptfile=first_scriptfile.next;scriptfile->next!=NULL;scriptfile=scriptfile->next){
@@ -2422,16 +2772,16 @@ void ScriptMenu(int value){
         file=scriptfile->file;
         if(file==NULL)continue;
         if(scriptfile->id!=value)continue;
-        error_code=compile_script(file);
+        error_code= CompileScript(file);
         if(error_code==0){
-      //    ReadINI(NULL);
-          start_script();
+      //    ReadIni(NULL);
+          StartScript();
         }
         else{
           fprintf(stderr,"*** Error (fatal): unable to open script file");
           if(file!=NULL)fprintf(stderr,": %s",file);
           fprintf(stderr,"\n");
-          if(from_commandline==1)exit(1);
+          if(from_commandline==1)SMV_EXIT(1);
         }
         break;
       }
@@ -2448,12 +2798,8 @@ void LuaScriptMenu(int value){
 
   if(value==MENU_DUMMY)return;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
-    // case SCRIPT_FILE_LOADING:
-    //   defer_file_loading = 1 - defer_file_loading;
-    //   update_defer();
-    //   break;
     default:
       for(luascriptfile=first_luascriptfile.next;luascriptfile->next!=NULL;luascriptfile=luascriptfile->next){
         char *file;
@@ -2480,14 +2826,31 @@ void LuaScriptMenu(int value){
 void ReloadMenu(int value){
   int msecs;
 
+  if(value == MENU_DUMMY)return;
   updatemenu=1;
   periodic_value=value;
   switch(value){
-  case STOP_RENDERING:
+  case STOP_RELOADING:
     periodic_reloads=0;
     break;
-  case RELOAD_NOW:
+  case RELOAD_SWITCH:
+    if(load_incremental==1)LoadUnloadMenu(RELOAD_INCREMENTAL_ALL);
+    if(load_incremental==0)LoadUnloadMenu(RELOADALL);
+  break;
+  case RELOAD_ALL_NOW:
     LoadUnloadMenu(RELOADALL);
+    break;
+  case RELOAD_INCREMENTAL_NOW:
+    LoadUnloadMenu(RELOAD_INCREMENTAL_ALL);
+    break;
+  case RELOAD_SMV_FILE:
+    ReadSMVDynamic(smv_filename);
+    break;
+  case RELOAD_MODE_INCREMENTAL:
+    load_incremental = 1;
+    break;
+  case RELOAD_MODE_ALL:
+    load_incremental = 0;
     break;
   default:
     periodic_reloads=1;
@@ -2507,7 +2870,7 @@ void AboutMenu(int value){
 void LoadVolsmoke3DMenu(int value){
   if(value == MENU_DUMMY)return;
   updatemenu = 1;
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value >= 0){
     meshdata *meshi;
     volrenderdata *vr;
@@ -2520,13 +2883,15 @@ void LoadVolsmoke3DMenu(int value){
         fprintf(scriptoutstream, "LOADVOLSMOKE\n");
         fprintf(scriptoutstream, " %i\n", value);
       }
-      if(read_vol_mesh == VOL_READNONE){
-        read_vol_mesh = value;
-        ReadVolsmokeAllFramesAllMeshes();
-      }
-      else{
-        fprintf(stderr, "*** Warning: 3D smoke is currently being loaded\n");
-        fprintf(stderr, "   Load data when this is complete.\n");
+      if(scriptoutstream==NULL||script_defer_loading==0){
+        if(read_vol_mesh==VOL_READNONE){
+          read_vol_mesh = value;
+          ReadVolsmokeAllFramesAllMeshes();
+        }
+        else{
+          fprintf(stderr, "*** Warning: 3D smoke is currently being loaded\n");
+          fprintf(stderr, "   Load data when this is complete.\n");
+        }
       }
     }
   }
@@ -2552,7 +2917,9 @@ void LoadVolsmoke3DMenu(int value){
     }
     if(read_vol_mesh == VOL_READNONE){
       read_vol_mesh = VOL_READALL;
-      ReadVolsmokeAllFramesAllMeshes();
+      if(scriptoutstream==NULL||script_defer_loading==0){
+        ReadVolsmokeAllFramesAllMeshes();
+      }
     }
     else{
       if(read_vol_mesh == VOL_UNLOAD){
@@ -2564,19 +2931,25 @@ void LoadVolsmoke3DMenu(int value){
       fprintf(stderr, "    Continue when this is complete.\n");
     }
   }
+  else if(value==MENU_VOLSMOKE_SETTINGS){
+    ShowBoundsDialog(DLG_3DSMOKE);
+  }
   updatemenu = 1;
-  Idle_CB();
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  IdleCB();
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
 /* ------------------ ReloadAllSliceFiles ------------------------ */
 
 void ReloadAllSliceFiles(void){
   int ii;
+  int file_count = 0;
+  float load_size = 0.0, load_time;
 
   LOCK_COMPRESS
-  islicetype_save = islicetype;
+  slicefile_labelindex_save = slicefile_labelindex;
+  START_TIMER(load_time);
   for(ii = 0; ii < nslice_loaded; ii++){
     slicedata *slicei;
     int set_slicecolor;
@@ -2587,9 +2960,22 @@ void ReloadAllSliceFiles(void){
     slicei = sliceinfo + i;
     set_slicecolor = DEFER_SLICECOLOR;
     if(ii == nslice_loaded-1)set_slicecolor = SET_SLICECOLOR;
-    ReadSlice(slicei->file, i, LOAD, set_slicecolor, &errorcode);
+
+    if(slicei->slice_filetype == SLICE_GEOM){
+      load_size+=ReadGeomData(slicei->patchgeom, slicei, LOAD, &errorcode);
+    }
+    else{
+#ifdef pp_NEWBOUND_DIALOG
+      load_size+=ReadSliceUseGluiBounds(slicei->file,i,LOAD,set_slicecolor,&errorcode);
+#else
+      load_size+=ReadSlice(slicei->file,i,LOAD,set_slicecolor,&errorcode);
+#endif
+    }
+    file_count++;
   }
-  islicetype = islicetype_save;
+  STOP_TIMER(load_time);
+  PRINT_LOADTIMES(file_count,load_size,load_time);
+  slicefile_labelindex = slicefile_labelindex_save;
   UNLOCK_COMPRESS;
 }
 
@@ -2599,14 +2985,12 @@ void LoadUnloadMenu(int value){
   int errorcode;
   int i;
   int ii;
+  int file_count = 0;
+  float load_size = 0.0, load_time;
 
   if(value==MENU_DUMMY)return;
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value==UNLOADALL){
-   // leaving code here commented in case I later decide to unload terrain files
-   // for(i=0;i<nterraininfo;i++){
-   //   readterrain("",i,UNLOAD,&errorcode);
-   // }
     if(scriptoutstream!=NULL){
       fprintf(scriptoutstream,"UNLOADALL\n");
     }
@@ -2620,52 +3004,57 @@ void LoadUnloadMenu(int value){
       slicedata *slicei;
 
       slicei = sliceinfo + i;
-      ReadSlice(slicei->file, i, UNLOAD, DEFER_SLICECOLOR,&errorcode);
+      if(slicei->loaded == 1){
+        if(slicei->slice_filetype == SLICE_GEOM){
+          ReadGeomData(slicei->patchgeom, slicei, UNLOAD, &errorcode);
+        }
+        else{
+          ReadSlice(slicei->file, i, UNLOAD, DEFER_SLICECOLOR,&errorcode);
+        }
+      }
     }
     for(i = 0; i<nplot3dinfo; i++){
-      readplot3d("",i,UNLOAD,&errorcode);
+      ReadPlot3D("",i,UNLOAD,&errorcode);
     }
     for(i=0;i<npatchinfo;i++){
-      readpatch(i,UNLOAD,&errorcode);
+      ReadBoundary(i,UNLOAD,&errorcode);
     }
     for(i=0;i<npartinfo;i++){
-      readpart("",i,UNLOAD,PARTDATA,&errorcode);
+      ReadPart("",i,UNLOAD,&errorcode);
     }
     for(i=0;i<nisoinfo;i++){
-      readiso("",i,UNLOAD,NULL,&errorcode);
+      ReadIso("",i,UNLOAD,NULL,&errorcode);
     }
     for(i=0;i<nzoneinfo;i++){
-      readzone(i,UNLOAD,&errorcode);
+      ReadZone(i,UNLOAD,&errorcode);
     }
     for(i=0;i<nsmoke3dinfo;i++){
-      ReadSmoke3D(i,UNLOAD,&errorcode);
+      ReadSmoke3D(ALL_FRAMES, i, UNLOAD, FIRST_TIME, &errorcode);
     }
     if(nvolrenderinfo>0){
       UnLoadVolsmoke3DMenu(UNLOAD_ALL);
     }
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
-  if(value==RELOADALL){
+  if(value==RELOADALL||value==RELOAD_INCREMENTAL_ALL){
     int last_slice_loaded;
+    int load_mode;
+
+    if(value==RELOADALL)load_mode = LOAD;
+    if(value==RELOAD_INCREMENTAL_ALL)load_mode = RELOAD;
 
     LOCK_COMPRESS
-    ReadSMVDynamic(smv_filename);
     if(hrr_csv_filename!=NULL){
       ReadHRR(LOAD, &errorcode);
     }
-    islicetype_save=islicetype;
+    slicefile_labelindex_save=slicefile_labelindex;
     for(i=0;i<nsliceinfo;i++){
       sliceinfo[i].reload=1;
     }
-    for(i=0;i<nterraininfo;i++){
-      if(terraininfo[i].loaded==1){
-        readterrain(terraininfo[i].file,i,LOAD,&errorcode);
-      }
-    }
     for(i=0;i<nvsliceinfo;i++){
       if(vsliceinfo[i].loaded==1){
-        ReadVSlice(i,LOAD,&errorcode);
+        ReadVSlice(i, load_mode,&errorcode);
       }
     }
     if(nslice_loaded>1)last_slice_loaded = slice_loaded_list[nslice_loaded-1];
@@ -2680,6 +3069,7 @@ void LoadUnloadMenu(int value){
         break;
       }
     }
+    START_TIMER(load_time);
     for(ii = 0; ii<nslice_loaded; ii++){
       slicedata *slicei;
 
@@ -2690,28 +3080,39 @@ void LoadUnloadMenu(int value){
 
         set_slicecolor = DEFER_SLICECOLOR;
         if(i == last_slice_loaded)set_slicecolor = SET_SLICECOLOR;
-        ReadSlice(slicei->file,i,LOAD,set_slicecolor,&errorcode);
+        if(slicei->slice_filetype==SLICE_GEOM){
+          ReadGeomData(slicei->patchgeom, slicei, load_mode, &errorcode);
+        }
+        else{
+#ifdef pp_NEWBOUND_DIALOG
+          ReadSliceUseGluiBounds(slicei->file, i, load_mode, set_slicecolor, &errorcode);
+#else
+          ReadSlice(slicei->file, i, load_mode, set_slicecolor, &errorcode);
+#endif
+        }
       }
     }
-    islicetype=islicetype_save;
+    STOP_TIMER(load_time);
+    PRINT_LOADTIMES(file_count,load_size,load_time);
+    slicefile_labelindex=slicefile_labelindex_save;
     for(i=0;i<nplot3dinfo;i++){
       if(plot3dinfo[i].loaded==1){
-        readplot3d(plot3dinfo[i].file,i,LOAD,&errorcode);
+        ReadPlot3D(plot3dinfo[i].file,i,LOAD,&errorcode);
       }
     }
     for(ii=0;ii<npatch_loaded;ii++){
       i = patch_loaded_list[ii];
-      readpatch(i,LOAD,&errorcode);
+      ReadBoundary(i, load_mode,&errorcode);
     }
     for(i=0;i<nsmoke3dinfo;i++){
       if(smoke3dinfo[i].loaded==1||smoke3dinfo[i].request_load==1){
-        ReadSmoke3D(i,LOAD,&errorcode);
+        ReadSmoke3D(ALL_FRAMES, i, load_mode, FIRST_TIME, &errorcode);
       }
     }
     for(i=0;i<npartinfo;i++){
       if(partinfo[i].loaded==1){
         partinfo[i].reload=1;
-        readpart(partinfo[i].file,i,UNLOAD,PARTDATA,&errorcode);
+        ReadPart(partinfo[i].file,i,UNLOAD,&errorcode);
       }
       else{
         partinfo[i].reload=0;
@@ -2720,46 +3121,48 @@ void LoadUnloadMenu(int value){
     npartframes_max=GetMinPartFrames(PARTFILE_RELOADALL);
     for(i=0;i<npartinfo;i++){
       if(partinfo[i].reload==1){
-        readpart(partinfo[i].file, i, UNLOAD, PARTDATA,&errorcode);
+        ReadPart(partinfo[i].file, i, UNLOAD, &errorcode);
       }
     }
     for(i=0;i<npartinfo;i++){
       if(partinfo[i].reload==1){
-        readpart(partinfo[i].file, i, LOAD, PARTDATA,&errorcode);
+        ReadPart(partinfo[i].file, i, LOAD, &errorcode);
       }
     }
     update_readiso_geom_wrapup = UPDATE_ISO_START_ALL;
+    CancelUpdateTriangles();
     for(i = 0; i<nisoinfo; i++){
       isodata *isoi;
 
       isoi = isoinfo + i;
       if(isoi->loaded==0)continue;
-      readiso(isoi->file,i,LOAD,NULL,&errorcode);
+      ReadIso(isoi->file,i,LOAD,NULL,&errorcode);
     }
-    if(update_readiso_geom_wrapup == UPDATE_ISO_ALL_NOW)readiso_geom_wrapup();
+    if(update_readiso_geom_wrapup == UPDATE_ISO_ALL_NOW)ReadIsoGeomWrapup(BACKGROUND);
     update_readiso_geom_wrapup = UPDATE_ISO_OFF;
+    ReadSMVDynamic(smv_filename);
     UNLOCK_COMPRESS
   //  plotstate=DYNAMIC_PLOTS;
   //  visParticles=1;
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
   }
   if(value==SHOWFILES){
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
     showfiles=1-showfiles;
     updatemenu=1;
     UpdateSliceMenuLabels();
-    UpdateVsliceMenulabels();
-    UpdateSmoke3DMenuLabels();
-    update_patch_menulabels();
-    update_iso_menulabels();
-    update_part_menulabels();
-    update_tour_menulabels();
-    update_plot3d_menulabels();
+    UpdateVsliceMenuLabels();
+    UpdateSmoke3dMenuLabels();
+    UpdateBoundaryMenuLabels();
+    UpdateIsoMenuLabels();
+    UpdatePartMenuLabels();
+    UpdateTourMenuLabels();
+    UpdatePlot3dMenuLabels();
   }
   if(value==REDIRECT){
     updatemenu=1;
-    glutPostRedisplay();
+    GLUTPOSTREDISPLAY;
     redirect=1-redirect;
     if(LOG_FILENAME!=NULL){
       fclose(LOG_FILENAME);
@@ -2776,7 +3179,7 @@ void LoadUnloadMenu(int value){
       SetStdOut(stdout);
     }
   }
-  glutSetCursor(GLUT_CURSOR_RIGHT_ARROW);
+  GLUTSETCURSOR(GLUT_CURSOR_RIGHT_ARROW);
 }
 
 void AvatarEvacMenu(int value){
@@ -2794,14 +3197,14 @@ void TourMenu(int value){
   if(value==MENU_DUMMY)return;
   touring=0;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
-  case MENU_TOUR_EDIT:
-    DialogMenu(DIALOG_TOUR);
+  case MENU_TOUR_SETTINGS:
+    DialogMenu(DIALOG_TOUR_SHOW);
     break;
   case MENU_TOUR_NEW:
-    add_new_tour();
-    DialogMenu(DIALOG_TOUR);
+    AddNewTour();
+    DialogMenu(DIALOG_TOUR_SHOW);
     break;
   case MENU_TOUR_CLEARALL:
     for(i=0;i<ntourinfo;i++){  // clear all tours
@@ -2834,12 +3237,12 @@ void TourMenu(int value){
     if(scriptoutstream!=NULL){
       fprintf(scriptoutstream,"UNLOADTOUR\n");
     }
-    DialogMenu(DIALOG_TOUR);
+    DialogMenu(DIALOG_TOUR_HIDE);
     break;
   case MENU_TOUR_SHOWDIALOG:
     edittour=1-edittour;
     if(edittour==1&&showtour_dialog==0){
-      show_glui_tour();
+      ShowGluiTour();
     }
     break;
   case MENU_TOUR_SHOWALL:               // show all tours
@@ -2859,7 +3262,7 @@ void TourMenu(int value){
       touri->display=0;
     }
     SetViewPoint(RESTORE_EXTERIOR_VIEW);
-    defaulttour();
+    DefaultTour();
     break;
   default:
     if(value<-22){
@@ -2897,14 +3300,28 @@ void TourMenu(int value){
     }
     break;
   }
-  updateviewtour();
-  delete_tourlist();
-  create_tourlist();
-  update_tourcontrols();
+  UpdateViewTour();
+  DeleteTourList();
+  CreateTourList();
+  UpdateTourControls();
   plotstate=GetPlotState(DYNAMIC_PLOTS);
   if(value!=-5&&value!=-4)UpdateTimes();
   callfrom_tourglui=0;
 
+}
+
+/* ------------------ TourCopyMenu ------------------------ */
+
+#define TOUR_INSERT_COPY 33
+void TourCopyMenu(int value){
+  if(value==-1){
+    TourMenu(MENU_TOUR_NEW);
+  }
+  else{
+    selectedtour_index=value;
+    TourCB(TOUR_INSERT_COPY);
+    DialogMenu(DIALOG_TOUR_SHOW);
+  }
 }
 
 /* ------------------ SetTour ------------------------ */
@@ -2915,64 +3332,6 @@ void SetTour(tourdata *thetour){
   if(thetour==NULL)return;
   tournumber = thetour - tourinfo;
   TourMenu(tournumber);
-}
-
-/* ------------------ LoadEvacMenu ------------------------ */
-
-void LoadEvacMenu(int value){
-  int errorcode;
-
-  if(value==MENU_EVAC_DUMMY)return;
-  glutSetCursor(GLUT_CURSOR_WAIT);
-  if(value >= 0 || value == PARTFILE_LOADALL){
-    GetPartHistogram(value);
-  }
-  if(value==EVACFILE_LOADALL){
-    int i;
-
-    for(i=0;i<npartinfo;i++){
-      partdata *parti;
-
-      parti=partinfo + i;
-      if(parti->evac==0)continue;
-      readpart(parti->file, i, UNLOAD, PARTDATA,&errorcode);
-    }
-    npartframes_max=GetMinPartFrames(PARTFILE_LOADALL);
-    for(i=0;i<npartinfo;i++){
-      partdata *parti;
-
-      parti=partinfo + i;
-      if(parti->evac==0)continue;
-      ReadEvacFile=1;
-      readpart(parti->file, i, LOAD, PARTDATA,&errorcode);
-      if(scriptoutstream!=NULL){
-        fprintf(scriptoutstream,"LOADFILE\n");
-        fprintf(scriptoutstream," %s\n",parti->file);
-      }
-    }
-    force_redisplay=1;
-    UpdateFrameNumber(0);
-  }
-  if(value>=0){
-    ReadEvacFile=1;
-    npartframes_max=GetMinPartFrames(value);
-    readpart(partinfo[value].file, value, LOAD, PARTDATA,&errorcode);
-    if(scriptoutstream!=NULL){
-      fprintf(scriptoutstream,"LOADFILE\n");
-      fprintf(scriptoutstream," %s\n",partinfo[value].file);
-    }
-  }
-  else if(value==MENU_EVAC_UNLOADALL){
-    int i;
-
-    for(i=0;i<npartinfo;i++){
-      if(partinfo[i].evac==0)continue;
-      readpart("", i, UNLOAD, PARTDATA,&errorcode);
-    }
-  }
-  updatemenu=1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
 }
 
 /* ------------------ UpdateStreakValue ------------------------ */
@@ -3020,11 +3379,11 @@ void ParticleStreakShowMenu(int value){
     streak5step=0;
     rvalue=streak_rvalue[value];
     UpdateStreakValue(rvalue-0.001);
-    update_glui_streakvalue(rvalue);
+    UpdateGluiStreakValue(rvalue);
 
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ Particle5ShowMenu ------------------------ */
@@ -3051,7 +3410,7 @@ void PropMenu(int value){
       propi->smokeview_id = propi->smokeview_ids[iobject];
       propi->smv_object = propi->smv_objects[iobject];
       updatemenu = 1;
-      get_indep_var_indices(propi->smv_object,
+      GetIndepVarIndices(propi->smv_object,
         propi->vars_indep, propi->nvars_indep,
         propi->vars_indep_index);
 
@@ -3059,11 +3418,10 @@ void PropMenu(int value){
         partclassdata *partclassi;
 
         partclassi = partclassinfo + i;
-        update_partclass_depend(partclassi);
+        UpdatePartClassDepend(partclassi);
 
       }
-
-      glutPostRedisplay();
+      GLUTPOSTREDISPLAY;
     }
   }
 }
@@ -3105,7 +3463,7 @@ void ParticlePropShowMenu(int value){
     if(iprop!=0){
       parttype=1;
     }
-    prop_index = iprop;
+    global_prop_index = iprop;
     partshortlabel=propi->label->shortlabel;
     partunitlabel=propi->label->unit;
     partscale=propi->scale;
@@ -3164,7 +3522,7 @@ void ParticlePropShowMenu(int value){
   }
   else if(value==MENU_PROP_TRACERS){
     show_tracers_always=1-show_tracers_always;
-    updatetracers();
+    UpdateTracers();
   }
   else{
     int iclass;
@@ -3191,106 +3549,226 @@ void ParticlePropShowMenu(int value){
       partclassj->vis_type=vistype;
       PropMenu(propvalue);
     }
-
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
-/* ------------------ LoadParticleMenu ------------------------ */
+/* ------------------ UnloadAllPartFiles ------------------------ */
 
-void LoadParticleMenu(int value){
+void UnloadAllPartFiles(void){
+  int i;
+
+  for(i = 0; i<npartinfo; i++){
+    partdata *parti;
+    int errorcode;
+
+    parti = partinfo+i;
+    if(parti->evac==1||parti->loaded==0)continue;
+    ReadPart(parti->file, i, UNLOAD, &errorcode);
+  }
+}
+
+#ifdef pp_SLICETHREAD
+/* ------------------ LoadAllSliceFiles ------------------------ */
+
+void LoadAllSliceFiles(int slicenum){
+  int i;
+
+  for(i = 0; i<nsliceinfo; i++){
+    slicedata *slicei;
+    int errorcode;
+    FILE_SIZE file_size;
+
+    slicei = sliceinfo+i;
+    if(slicei->skipload==1)continue;
+    if(slicenum>=0&&i!=slicenum)continue;  //  load only slice file with file index slicenum
+    LOCK_SLICE_LOAD;                       //  or load all slice files
+    if(slicei->loadstatus==FILE_UNLOADED){
+      slicei->loadstatus = FILE_LOADING;
+      UNLOCK_SLICE_LOAD;
+      file_size = ReadSlice(slicei->file, i, LOAD, SET_SLICECOLOR, &errorcode);
+      LOCK_SLICE_LOAD;
+      slicei->loadstatus = FILE_LOADED;
+      slice_load_size += file_size;
+      slice_file_count++;
+    }
+    UNLOCK_SLICE_LOAD;
+  }
+}
+#endif
+
+/* ------------------ LoadAllPartFiles ------------------------ */
+
+void LoadAllPartFiles(int partnum){
+  int i;
+
+  for(i = 0;i<npartinfo;i++){
+    partdata *parti;
+    int errorcode;
+    FILE_SIZE file_size;
+
+    parti = partinfo+i;
+    if(parti->skipload==1)continue;
+    if(partnum>=0&&i!=partnum)continue;  //  load only particle file with file index partnum
+    LOCK_PART_LOAD;                      //  or load all particle files
+    if(parti->loadstatus==FILE_UNLOADED){
+      parti->loadstatus = FILE_LOADING;
+      UNLOCK_PART_LOAD;
+      file_size = ReadPart(parti->file, i, LOAD, &errorcode);
+      LOCK_PART_LOAD;
+      parti->loadstatus = FILE_LOADED;
+      part_load_size += file_size;
+      part_file_count++;
+    }
+    UNLOCK_PART_LOAD;
+  }
+}
+
+#define PART 0
+#define EVAC 1
+
+/* ------------------ SetupPart ------------------------ */
+
+void SetupPart(int value, int option){
+  int i;
+
+  for(i = 0; i<npartinfo; i++){
+    partdata *parti;
+
+    parti = partinfo+i;
+    parti->finalize = 0;
+    parti->skipload = 1;
+    parti->loadstatus = FILE_UNLOADED;
+    parti->boundstatus = PART_BOUND_UNDEFINED;
+    if(option==PART&&parti->evac==1)continue;                 // don't load an evac file if part files are loaded
+    if(option==EVAC&&parti->evac==0)continue;                 // don't load a part file if evac files are loaded
+    if(parti->loaded==0&&value==PARTFILE_RELOADALL)continue;  // don't reload a file that is not currently loaded
+    parti->skipload = 0;
+  }
+
+  if(value>=0){
+    partdata *parti;
+
+    parti = partinfo+value;
+    ASSERT(value>=0&&value<npartinfo);
+    value = CLAMP(value, 0, npartinfo-1);
+    parti->finalize = 1;
+  }
+  else{
+    for(i = npartinfo-1; i>=0; i--){
+      partdata *parti;
+
+      parti = partinfo+i;
+      if(parti->skipload==1)continue;
+      parti->finalize = 1;
+    }
+  }
+}
+
+/* ------------------ LoadParticleEvacMenu ------------------------ */
+
+void LoadParticleEvacMenu(int value, int option){
   int errorcode,i;
 
-  glutSetCursor(GLUT_CURSOR_WAIT);
-  if(value>=0||value == PARTFILE_LOADALL){
-    GetPartHistogram(value);
-  }
+  part_load_size = 0;
+  part_file_count = 0;
+  global_part_boundsize = 0;
+  global_have_global_bound_file = 0;
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value>=0){
     char  *partfile;
     partdata *parti;
 
-    ReadPartFile=1;
     parti = partinfo + value;
     partfile = parti->file;
-#ifdef pp_PARTDEFER
-    parti->compute_bounds_color = 1;
-#endif
+    parti->finalize = 1;
     if(scriptoutstream!=NULL){
       fprintf(scriptoutstream,"LOADFILE\n");
       fprintf(scriptoutstream," %s\n",partfile);
     }
     npartframes_max=GetMinPartFrames(PARTFILE_RELOADALL);
     npartframes_max=MAX(GetMinPartFrames(value),npartframes_max);
-    readpart(partfile, value, LOAD, PARTDATA,&errorcode);
+    if(scriptoutstream==NULL||script_defer_loading==0){
+      SetupPart(value,option);                                                // load only particle file with index value
+      GetAllPartBoundsMT();
+      LoadAllPartFilesMT(value);
+    }
   }
   else{
-    if(value==-1){
+    if(value==MENU_PARTICLE_UNLOAD_ALL){
       for(i=0;i<npartinfo;i++){
         partdata *parti;
 
         parti = partinfo + i;
-        if(parti->evac==1)continue;
-        readpart("", i, UNLOAD, PARTDATA,&errorcode);
+        if(option==PART&&parti->evac==1)continue;
+        if(option==EVAC&&parti->evac==0)continue;
+        ReadPart("", i, UNLOAD, &errorcode);
       }
     }
+    else if(value==MENU_PART_SETTINGS){
+      ShowBoundsDialog(DLG_PART);
+    }
+    else if(value==MENU_PART_PARTFAST){
+      updatemenu = 1;
+      partfast = 1-partfast;
+      if(partfast==0)printf("fast loading: off\n");
+      if(partfast==1)printf("fast loading: on\n");
+      UpdateGluiPartFast();
+    }
     else{
-#ifdef pp_PARTDEFER
-      int lasti = 0;
-#endif
-
       if(scriptoutstream!=NULL){
         fprintf(scriptoutstream,"LOADPARTICLES\n");
       }
       if(value==PARTFILE_LOADALL){
+        SetupPart(value,option);
+        GetAllPartBoundsMT();
         npartframes_max=GetMinPartFrames(PARTFILE_LOADALL);
       }
       else{
         npartframes_max=GetMinPartFrames(PARTFILE_RELOADALL);
       }
-      if(value==PARTFILE_LOADALL){
-        for(i = 0; i<npartinfo; i++){
-          partdata *parti;
 
-          parti = partinfo+i;
-          if(parti->evac==1)continue;
-          readpart(parti->file, i, UNLOAD, PARTDATA, &errorcode);
-        }
-      }
-#ifdef pp_PARTDEFER
-      lasti = 0;
-      for(i = 0;i < npartinfo;i++){
-        partdata *parti;
+      if(scriptoutstream==NULL||script_defer_loading==0){
 
-        parti = partinfo + i;
-        if(parti->evac == 1)continue;
-        if(parti->loaded == 0 && value == PARTFILE_RELOADALL)continue;
-        lasti = i;
-      }
-#endif
-      for(i=0;i<npartinfo;i++){
-        partdata *parti;
+        SetupPart(value,option);
 
-        parti = partinfo + i;
-        if(parti->evac==1)continue;
-        if(parti->loaded==0&&value==PARTFILE_RELOADALL)continue;
-#ifdef pp_PARTDEFER
-        if(lasti == i){
-          parti->compute_bounds_color = 1;
+        // unload particle files
+
+
+        if(value!=PARTFILE_RELOADALL&&value!=EVACFILE_RELOADALL){
+          UnloadAllPartFiles();
         }
-        else{
-          parti->compute_bounds_color = 0;
-        }
-#endif
-        readpart(parti->file, i, LOAD, PARTDATA,&errorcode);
+
+        // load particle files unless we are reloading and the were not loaded before
+
+#define ALL_PART_FILES -1
+        START_TIMER(part_load_time);
+        GetAllPartBoundsMT();
+        LoadAllPartFilesMT(ALL_PART_FILES);
+        STOP_TIMER(part_load_time);
+        PRINT_LOADTIMES(part_file_count,part_load_size,part_load_time);
+
+        force_redisplay = 1;
+        UpdateFrameNumber(0);
       }
-      force_redisplay=1;
-      UpdateFrameNumber(0);
     }
   }
   updatemenu=1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
+}
+
+/* ------------------ LoadParticleMenu ------------------------ */
+
+void LoadParticleMenu(int value){
+  LoadParticleEvacMenu(value,PART);
+}
+
+/* ------------------ LoadEvacMenu ------------------------ */
+
+void LoadEvacMenu(int value){
+  LoadParticleEvacMenu(value,EVAC);
 }
 
 /* ------------------ ZoneMenu ------------------------ */
@@ -3305,15 +3783,15 @@ void ZoneMenu(int value){
       fprintf(scriptoutstream,"LOADFILE\n");
       fprintf(scriptoutstream," %s\n",zonei->file);
     }
-    readzone(value,LOAD,&errorcode);
+    ReadZone(value,LOAD,&errorcode);
   }
   else{
     for(i=0;i<nzoneinfo;i++){
-      readzone(i,UNLOAD,&errorcode);
+      ReadZone(i,UNLOAD,&errorcode);
     }
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ UnloadVSliceMenu ------------------------ */
@@ -3322,7 +3800,7 @@ void UnloadVSliceMenu(int value){
   int errorcode,i;
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value>=0){
     ReadVSlice(value,UNLOAD,&errorcode);
   }
@@ -3341,19 +3819,24 @@ void UnloadVSliceMenu(int value){
   }
 }
 
-/* ------------------ UnloadPatchMenu ------------------------ */
+/* ------------------ UnloadBoundaryMenu ------------------------ */
 
-void UnloadPatchMenu(int value){
+void UnloadBoundaryMenu(int value){
   int errorcode,i;
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value>=0){
-    readpatch(value,UNLOAD,&errorcode);
+    ReadBoundary(value,UNLOAD,&errorcode);
   }
   else{
     for(i=0;i<npatchinfo;i++){
-      readpatch(i,UNLOAD,&errorcode);
+      patchdata *patchi;
+
+      patchi = patchinfo+i;
+      if(patchi->filetype_label==NULL||strcmp(patchi->filetype_label, "INCLUDE_GEOM")!=0){
+        ReadBoundary(i,UNLOAD,&errorcode);
+      }
     }
   }
 }
@@ -3364,13 +3847,13 @@ void UnloadIsoMenu(int value){
   int errorcode,i;
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value>=0){
-    readiso("",value,UNLOAD,NULL,&errorcode);
+    ReadIso("",value,UNLOAD,NULL,&errorcode);
   }
   else{
     for(i=0;i<nisoinfo;i++){
-      readiso("",i,UNLOAD,NULL,&errorcode);
+      ReadIso("",i,UNLOAD,NULL,&errorcode);
     }
   }
 }
@@ -3381,13 +3864,13 @@ void UnloadPlot3dMenu(int value){
   int errorcode,i;
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value>=0){
-    readplot3d("",value,UNLOAD,&errorcode);
+    ReadPlot3D("",value,UNLOAD,&errorcode);
   }
   else{
     for(i=0;i<nplot3dinfo;i++){
-      readplot3d("",i,UNLOAD,&errorcode);
+      ReadPlot3D("",i,UNLOAD,&errorcode);
     }
   }
 }
@@ -3398,14 +3881,14 @@ void UnloadEvacMenu(int value){
   int errorcode,i;
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value>=0){
-    readpart("", value, UNLOAD, PARTDATA,&errorcode);
+    ReadPart("", value, UNLOAD, &errorcode);
   }
   else{
     for(i=0;i<npartinfo;i++){
       if(partinfo[i].evac==0)continue;
-      readpart("", i, UNLOAD, PARTDATA,&errorcode);
+      ReadPart("", i, UNLOAD, &errorcode);
     }
   }
 }
@@ -3416,42 +3899,41 @@ void UnloadPartMenu(int value){
   int errorcode,i;
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value>=0){
-    readpart("", value, UNLOAD, PARTDATA,&errorcode);
+    ReadPart("", value, UNLOAD, &errorcode);
   }
   else{
     for(i=0;i<npartinfo;i++){
       if(partinfo[i].evac==1)continue;
-      readpart("", i, UNLOAD, PARTDATA,&errorcode);
+      ReadPart("", i, UNLOAD, &errorcode);
     }
   }
 }
 
-/* ------------------ LoadVSliceMenu ------------------------ */
+/* ------------------ LoadVSliceMenu2 ------------------------ */
 
-void LoadVSliceMenu(int value){
+FILE_SIZE LoadVSliceMenu2(int value){
   int errorcode;
   int i;
+  FILE_SIZE return_filesize = 0;
 
-  if(value==MENU_DUMMY)return;
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  if(value==MENU_DUMMY)return 0;
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value==UNLOAD_ALL){
     for(i=0;i<nvsliceinfo;i++){
       ReadVSlice(i,UNLOAD,&errorcode);
     }
-    return;
+    return 0;
   }
-  else if(value==MENU_LOADVSLICE_SHOWALL){
-    showallslicevectors=1-showallslicevectors;
-    updatemenu=1;
-    glutPostRedisplay();
+  else if(value==MENU_LOADVSLICE_SETTINGS){
+    ShowBoundsDialog(DLG_SLICE);
   }
   else if(value>=0){
     vslicedata *vslicei;
     slicedata *slicei;
 
-    ReadVSlice(value, LOAD, &errorcode);
+    return_filesize = ReadVSlice(value, LOAD, &errorcode);
     vslicei = vsliceinfo + value;
     slicei = vslicei->val;
     if(script_multivslice==0&&slicei!=NULL&&scriptoutstream!=NULL){
@@ -3467,6 +3949,8 @@ void LoadVSliceMenu(int value){
     vslicedata *vslicei;
     slicedata *slicei;
     int dir;
+    int file_count = 0;
+    float load_size = 0.0, load_time;
 
     value = -(1000 + value);
     submenutype=value/4;
@@ -3475,6 +3959,7 @@ void LoadVSliceMenu(int value){
     vslicei = vsliceinfo + submenutype;
     slicei = sliceinfo + vslicei->ival;
     submenulabel = slicei->label.longlabel;
+    START_TIMER(load_time);
     for(i=0;i<nvsliceinfo;i++){
       char *longlabel;
 
@@ -3483,10 +3968,21 @@ void LoadVSliceMenu(int value){
       longlabel = slicei->label.longlabel;
       if(strcmp(longlabel,submenulabel)!=0)continue;
       if(dir!=0&&dir!=slicei->idir)continue;
-      ReadVSlice(i,LOAD,&errorcode);
+      file_count++;
+      load_size+=ReadVSlice(i,LOAD,&errorcode);
     }
+    STOP_TIMER(load_time);
+    PRINT_LOADTIMES(file_count,load_size,load_time);
   }
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
+  return return_filesize;
+}
+
+
+/* ------------------ LoadVSliceMenu ------------------------ */
+
+void LoadVSliceMenu(int value){
+  LoadVSliceMenu2(value);
 }
 
 /* ------------------ UnloadSliceMenu ------------------------ */
@@ -3495,14 +3991,42 @@ void UnloadSliceMenu(int value){
   int errorcode,i;
 
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value>=0){
-    ReadSlice("",value,UNLOAD,SET_SLICECOLOR,&errorcode);
+    slicedata *slicei;
+
+    slicei = sliceinfo+value;
+
+    if(slicei->slice_filetype==SLICE_GEOM){
+      ReadGeomData(slicei->patchgeom, slicei, UNLOAD, &errorcode);
+    }
+    else{
+      ReadSlice("", value, UNLOAD, SET_SLICECOLOR, &errorcode);
+    }
+  }
+  if(value<=-3){
+    UnloadBoundaryMenu(-3-value);
   }
   else{
     if(value==UNLOAD_ALL){
       for(i=0;i<nsliceinfo;i++){
-        ReadSlice("",i,UNLOAD,DEFER_SLICECOLOR,&errorcode);
+        slicedata *slicei;
+
+        slicei = sliceinfo+i;
+        if(slicei->slice_filetype == SLICE_GEOM){
+          ReadGeomData(slicei->patchgeom, slicei, UNLOAD, &errorcode);
+        }
+        else{
+          ReadSlice("",i,UNLOAD,DEFER_SLICECOLOR,&errorcode);
+        }
+      }
+      for(i=0;i<npatchinfo;i++){
+        patchdata *patchi;
+
+        patchi = patchinfo + i;
+        if(patchi->filetype_label!=NULL&&strcmp(patchi->filetype_label, "INCLUDE_GEOM")==0){
+          UnloadBoundaryMenu(i);
+        }
       }
     }
     else if(value==UNLOAD_LAST){
@@ -3510,7 +4034,15 @@ void UnloadSliceMenu(int value){
 
       unload_index=LastSliceLoadstack();
       if(unload_index>=0&&unload_index<nsliceinfo){
-        ReadSlice("",unload_index,UNLOAD,SET_SLICECOLOR,&errorcode);
+        slicedata *slicei;
+
+        slicei = sliceinfo+unload_index;
+        if(slicei->slice_filetype==SLICE_GEOM){
+          ReadGeomData(slicei->patchgeom, slicei, UNLOAD, &errorcode);
+        }
+        else{
+          ReadSlice("", unload_index, UNLOAD, SET_SLICECOLOR, &errorcode);
+        }
       }
     }
   }
@@ -3545,6 +4077,9 @@ void UnloadMultiSliceMenu(int value){
       UnloadSliceMenu(mslicei->islices[i]);
     }
   }
+  else if(value<=-3){
+    UnloadSliceMenu(value);
+  }
   else{
     UnloadSliceMenu(UNLOAD_ALL);
   }
@@ -3557,7 +4092,7 @@ void ShowVolsmoke3DMenu(int value){
 
   if(value==MENU_DUMMY)return;
   updatemenu=1;
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value>=0){
     meshdata *meshi;
     volrenderdata *vr;
@@ -3571,21 +4106,16 @@ void ShowVolsmoke3DMenu(int value){
       }
     }
   }
-  else if(value==HIDE_ALL){  // hide all
-    for(i=0;i<nmeshes;i++){
-      meshdata *meshi;
-      volrenderdata *vr;
-
-      meshi = meshinfo + i;
-      vr = &(meshi->volrenderinfo);
-      if(vr->fireslice==NULL||vr->smokeslice==NULL)continue;
-      if(vr->loaded==1){
-        vr->display=0;
-        PRINTF("%s vis state:%i\n",meshi->label,vr->display);
-      }
+  else{
+    if(value==HIDE_VOLSMOKE){  // hide all
+      show_volsmokefiles=0;
     }
-  }
-  else if(value==SHOW_ALL){  // show all
+    else if(value==SHOW_VOLSMOKE){  // show all
+      show_volsmokefiles=1;
+    }
+    else if(value==TOGGLE_VOLSMOKE){  // show all
+      show_volsmokefiles=1-show_volsmokefiles;
+    }
     for(i=0;i<nmeshes;i++){
       meshdata *meshi;
       volrenderdata *vr;
@@ -3594,13 +4124,13 @@ void ShowVolsmoke3DMenu(int value){
       vr = &(meshi->volrenderinfo);
       if(vr->fireslice==NULL||vr->smokeslice==NULL)continue;
       if(vr->loaded==1){
-        vr->display=1;
+        vr->display=show_volsmokefiles;
         PRINTF("%s vis state:%i\n",meshi->label,vr->display);
       }
     }
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ UnLoadVolsmoke3DMenu ------------------------ */
@@ -3638,7 +4168,7 @@ void UnLoadVolsmoke3DMenu(int value){
   }
   updatemenu=1;
   read_vol_mesh=VOL_READNONE;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ UnLoadSmoke3DMenu ------------------------ */
@@ -3651,26 +4181,108 @@ void UnLoadSmoke3DMenu(int value){
   if(value==MENU_DUMMY)return;
   updatemenu=1;
   if(value<0){
-    value= -value;
+    value= -value-1;
     for(i=0;i<nsmoke3dinfo;i++){
       smoke3di = smoke3dinfo + i;
       if(smoke3di->loaded==1&&smoke3di->type==value){
-        ReadSmoke3D(i,UNLOAD,&errorcode);
+        ReadSmoke3D(ALL_FRAMES, i, UNLOAD, FIRST_TIME, &errorcode);
       }
     }
   }
   else{
-    ReadSmoke3D(value,UNLOAD,&errorcode);
+    ReadSmoke3D(ALL_FRAMES, value, UNLOAD, FIRST_TIME, &errorcode);
   }
+}
+
+/* ------------------ LoadSmoke3D ------------------------ */
+
+FILE_SIZE LoadSmoke3D(int type, int *count){
+  int last_smoke = 0, i, file_count=0,errorcode;
+  FILE_SIZE load_size=0;
+  int need_soot, need_hrrpuv, need_temp, need_co2;
+  FILE_SIZE total_size;
+
+  need_soot   = type&SOOT_2;
+  need_hrrpuv = type&HRRPUV_2;
+  need_temp   = type&TEMP_2;
+  need_co2    = type&CO2_2;
+  for(i = nsmoke3dinfo-1; i>=0; i--){
+    smoke3ddata *smoke3di;
+
+    smoke3di = smoke3dinfo+i;
+    if(
+      (need_soot   == SOOT_2    && smoke3di->type == SOOT)   ||
+      (need_hrrpuv == HRRPUV_2  && smoke3di->type == HRRPUV) ||
+      (need_temp   == TEMP_2    && smoke3di->type == TEMP)   ||
+      (need_co2    == CO2_2     && smoke3di->type == CO2)){
+    last_smoke = i;
+    break;
+    }
+  }
+  total_size = 0;
+  for(i=0;i<nsmoke3dinfo;i++){
+    smoke3ddata *smoke3di;
+
+    smoke3di = smoke3dinfo + i;
+    if(
+      (need_soot   == SOOT_2    && smoke3di->type == SOOT)   ||
+      (need_hrrpuv == HRRPUV_2  && smoke3di->type == HRRPUV) ||
+      (need_temp   == TEMP_2    && smoke3di->type == TEMP)   ||
+      (need_co2    == CO2_2     && smoke3di->type == CO2)){
+      file_count++;
+      smoke3di->finalize = 0;
+      if(i == last_smoke)smoke3di->finalize = 1;
+      if(compute_smoke3d_file_sizes==1){
+        smoke3di->file_size = GetFileSizeSMV(smoke3di->reg_file);
+        total_size += smoke3di->file_size;
+      }
+      else{
+        load_size += ReadSmoke3D(ALL_FRAMES, i, LOAD, FIRST_TIME, &errorcode);
+      }
+    }
+  }
+  if(compute_smoke3d_file_sizes==1){
+    PRINTF(" size of 3D smoke files to be loaded=");
+    if(total_size>1000000000){
+      PRINTF("%.1f GB\n", (float)total_size/1000000000.);
+    }
+    else if(total_size>1000000){
+      PRINTF("%.1f MB\n", (float)total_size/1000000.);
+    }
+    else{
+      PRINTF("%.0f kB\n", (float)total_size/1000.);
+    }
+    PRINTF(" minimum network load time=%f s\n",(float)total_size*8.0/1000000000.0);
+    PRINTF("   (assuming a gigabit network connection)\n");
+  }
+  *count = file_count;
+  return load_size;
 }
 
 /* ------------------ LoadSmoke3DMenu ------------------------ */
 
 void LoadSmoke3DMenu(int value){
   int i,errorcode;
-  smoke3ddata *smoke3di, *smoke3dj;
+  int file_count;
+  float load_time, load_size;
 
-  glutSetCursor(GLUT_CURSOR_WAIT);
+#ifdef pp_SMOKE_FAST
+#define MENU_SMOKE_SOOT_HRRPUV     -5
+#define MENU_SMOKE3D_LOAD_TEST     -3
+#define MENU_SMOKE_SOOT_HRRPUV_CO2 -6
+#define MENU_SMOKE_SOOT_TEMP       -7
+#define MENU_SMOKE_SOOT_TEMP_CO2   -8
+#endif
+
+#define MENU_DUMMY_SMOKE           -9
+#define MENU_SMOKE_SETTINGS        -4
+#define MENU_SMOKE_FILE_SIZES     -10
+
+  if(value == MENU_DUMMY_SMOKE)return;
+  START_TIMER(load_time);
+  load_size = 0.0;
+  file_count=0;
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value>=0){
     if(scriptoutstream!=NULL){
       char *file;
@@ -3679,47 +4291,103 @@ void LoadSmoke3DMenu(int value){
       fprintf(scriptoutstream,"LOADFILE\n");
       fprintf(scriptoutstream," %s\n",file);
     }
-    if(scriptoutstream==NULL||defer_file_loading==0){
-      ReadSmoke3D(value,LOAD,&errorcode);
+    if(scriptoutstream==NULL||script_defer_loading==0){
+      smoke3ddata *smoke3di;
+
+      smoke3di = smoke3dinfo + value;
+      smoke3di->finalize = 1;
+      ReadSmoke3D(ALL_FRAMES, value, LOAD, FIRST_TIME, &errorcode);
     }
   }
   else if(value==UNLOAD_ALL){
     for(i=0;i<nsmoke3dinfo;i++){
-      ReadSmoke3D(i,UNLOAD,&errorcode);
+      ReadSmoke3D(ALL_FRAMES, i, UNLOAD, FIRST_TIME, &errorcode);
     }
   }
-  else if(value==MENU_SMOKE3D_IBLANK){
-    update_makeiblank_smoke3d = 1;
+  else if(value == MENU_SMOKE_SETTINGS){
+    ShowBoundsDialog(DLG_3DSMOKE);
   }
-  else if(value==-9){
-    if(scriptoutstream==NULL||defer_file_loading==0){
-      for(i=0;i<nsmoke3dinfo;i++){
-        smoke3di = smoke3dinfo + i;
-        if(smoke3di->loaded==1)continue;
-        ReadSmoke3D(i,LOAD,&errorcode);
-      }
+#ifdef pp_SMOKE_FAST
+  else if(value == MENU_SMOKE_SOOT_HRRPUV){
+    if(smoke3d_load_test == 1){
+      int errorcode;
+
+      ReadSmoke3DAllMeshesAllTimes(SOOT_2|HRRPUV_2, &errorcode);
     }
-    ASSERT(FFALSE); // check to see if this code segment is used
+    else{
+      load_size=LoadSmoke3D(SOOT_2|HRRPUV_2, &file_count);
+    }
   }
-  else if(value<=-10){
-    value = -(value + 10);
+  else if(value == MENU_SMOKE_SOOT_HRRPUV_CO2){
+    if(smoke3d_load_test==1){
+      int errorcode;
+
+      ReadSmoke3DAllMeshesAllTimes(SOOT|HRRPUV|CO2, &errorcode);
+    }
+    else{
+      load_size=LoadSmoke3D(SOOT_2|HRRPUV_2|CO2_2, &file_count);
+     }
+  }
+  else if(value == MENU_SMOKE_SOOT_TEMP){
+    if(smoke3d_load_test==1){
+      int errorcode;
+
+      ReadSmoke3DAllMeshesAllTimes(SOOT|TEMP, &errorcode);
+    }
+    else{
+     load_size=LoadSmoke3D(SOOT_2|TEMP_2,&file_count);
+    }
+  }
+  else if(value == MENU_SMOKE_SOOT_TEMP_CO2){
+    if(smoke3d_load_test==1){
+      int errorcode;
+
+      ReadSmoke3DAllMeshesAllTimes(SOOT|TEMP|CO2, &errorcode);
+    }
+    else{
+      load_size=LoadSmoke3D(SOOT_2|TEMP_2|CO2_2, &file_count);
+    }
+  }
+#endif
+    else if(value ==MENU_SMOKE_FILE_SIZES){
+      compute_smoke3d_file_sizes = 1-compute_smoke3d_file_sizes;
+      updatemenu = 1;
+    }
+
+#ifdef pp_SMOKE_FAST
+  else if(value == MENU_SMOKE3D_LOAD_TEST){
+    smoke3d_load_test = 1 - smoke3d_load_test;
+  }
+#endif
+  else if(value<=-100){
+    smoke3ddata *smoke3dj;
+
+    value = -(value + 100);
     smoke3dj = smoke3dinfo + value;
     if(scriptoutstream!=NULL){
       fprintf(scriptoutstream,"LOAD3DSMOKE\n");
       fprintf(scriptoutstream," %s\n",smoke3dj->label.longlabel);
     }
-    if(scriptoutstream==NULL||defer_file_loading==0){
-      for(i=0;i<nsmoke3dinfo;i++){
-        smoke3di = smoke3dinfo + i;
-        if(strcmp(smoke3di->label.shortlabel,smoke3dj->label.shortlabel)==0){
-          ReadSmoke3D(i,LOAD,&errorcode);
-        }
+    if(scriptoutstream==NULL||script_defer_loading==0){
+#ifdef pp_SMOKE_FAST
+      if(smoke3d_load_test==1){
+        int errorcode;
+
+        ReadSmoke3DAllMeshesAllTimes(smoke3dj->type2, &errorcode);
       }
+      else{
+        load_size=LoadSmoke3D(smoke3dj->type2, &file_count);
+      }
+#endif
     }
   }
+  STOP_TIMER(load_time);
+  if(compute_smoke3d_file_sizes==0){
+    PRINT_LOADTIMES(file_count, load_size, load_time);
+  }
   updatemenu=1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
 /* ------------------ AnySmoke ------------------------ */
@@ -3741,49 +4409,6 @@ int AnySlices(char *type){
   return 0;
 }
 
-/* ------------------ UnLoadTerrainMenu ------------------------ */
-
-void UnloadTerrainMenu(int value){
-  int i;
-  int errorcode;
-
-  if(value >= 0 && value < nterraininfo){
-    readterrain("", value, UNLOAD, &errorcode);
-  }
-  else if(value == MENU_UNLOADTERRAIN_UNLOADALL){
-    for(i = 0; i < nterraininfo; i++){
-      UnloadTerrainMenu(i);
-    }
-  }
-  updatemenu = 1;
-  glutPostRedisplay();
-
-}
-
-/* ------------------ LoadTerrainMenu ------------------------ */
-
-void LoadTerrainMenu(int value){
-  int i;
-  int errorcode;
-
-  if(value>=0&&value<nterraininfo){
-    terraindata *terri;
-
-    terri = terraininfo + value;
-    readterrain(terri->file,value,LOAD,&errorcode);
-  }
-  else if(value==MENU_LOADTERRAIN_UNLOAD){
-    UnloadTerrainMenu(value);
-  }
-  else if(value==MENU_LOADTERRAIN_LOADALL){
-    for(i=0;i<nterraininfo;i++){
-      LoadTerrainMenu(i);
-    }
-  }
-  updatemenu=1;
-  glutPostRedisplay();
-}
-
 /* ------------------ DefineAllFEDs ------------------------ */
 
 void DefineAllFEDs(void){
@@ -3794,14 +4419,15 @@ void DefineAllFEDs(void){
     LoadSliceMenu(i);
     UnloadSliceMenu(i);
   }
-  exit(0);
+  SMV_EXIT(0);
 }
 
 /* ------------------ LoadSlicei ------------------------ */
 
-void LoadSlicei(int set_slicecolor, int value){
+FILE_SIZE LoadSlicei(int set_slicecolor, int value){
   slicedata *slicei;
   int errorcode;
+  FILE_SIZE return_filesize=0;
 
   slicei = sliceinfo + value;
   slicei->loading=1;
@@ -3811,7 +4437,7 @@ void LoadSlicei(int set_slicecolor, int value){
     fprintf(scriptoutstream, " %i %f\n", slicei->idir, slicei->position_orig);
     fprintf(scriptoutstream, " %i\n", slicei->blocknumber + 1);
   }
-  if(scriptoutstream == NULL || defer_file_loading == 0){
+  if(scriptoutstream==NULL||script_defer_loading==0){
     if(value < nsliceinfo - nfedinfo){
       colorbardata *fed_colorbar;
       int reset_colorbar = 0;
@@ -3819,8 +4445,16 @@ void LoadSlicei(int set_slicecolor, int value){
       fed_colorbar = GetColorbar(default_fed_colorbar);
       if(fed_colorbar != NULL&&fed_colorbar - colorbarinfo == colorbartype)reset_colorbar = 1;
 
-      ReadSlice(slicei->file, value, LOAD, set_slicecolor, &errorcode);
-
+      if(slicei->slice_filetype == SLICE_GEOM){
+        return_filesize = ReadGeomData(slicei->patchgeom, slicei, LOAD, &errorcode);
+      }
+      else {
+#ifdef pp_NEWBOUND_DIALOG
+        return_filesize=ReadSliceUseGluiBounds(slicei->file, value, LOAD, set_slicecolor, &errorcode);
+#else
+        return_filesize=ReadSlice(slicei->file, value, LOAD, set_slicecolor, &errorcode);
+#endif
+      }
       if(reset_colorbar == 1)ColorbarMenu(colorbartype_save);
     }
     else{
@@ -3830,80 +4464,111 @@ void LoadSlicei(int set_slicecolor, int value){
       if(fed_colorbar != NULL && current_colorbar != fed_colorbar)colorbartype_save = current_colorbar - colorbarinfo;
       ReadFed(value, LOAD, FED_SLICE, &errorcode);
       if(fed_colorbar != NULL)ColorbarMenu(fed_colorbar - colorbarinfo);
+      return_filesize = 0;
     }
   }
   slicei->loading=0;
+  CheckMemory;
+  return return_filesize;
 }
 
 /* ------------------ LoadSliceMenu ------------------------ */
 
 void LoadSliceMenu(int value){
   int errorcode,i;
+  float load_time, load_size = 0.0;
+  int file_count=0;
 
   if(value==MENU_DUMMY)return;
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value>=0){
     LoadSlicei(SET_SLICECOLOR,value);
   }
   else{
-    if(value==UNLOAD_ALL){
-      for(i=0;i<nsliceinfo;i++){
-        ReadSlice("",i,UNLOAD,DEFER_SLICECOLOR,&errorcode);
-      }
-    }
-    else if(value==MENU_SHOWSLICE_IN_GAS){
-      show_slice_in_obst = ONLY_IN_GAS;
-      UpdateShowSliceInObst();
-    }
-    else if(value==MENU_SHOWSLICE_IN_GASANDSOLID){
-      show_slice_in_obst = GAS_AND_SOLID;
-      UpdateShowSliceInObst();
-    }
-    else if(MENU_SHOWSLICE_IN_SOLID){
-      show_slice_in_obst = ONLY_IN_SOLID;
-      UpdateShowSliceInObst();
-    }
-    else{
+    switch (value){
       int submenutype;
       char *submenulabel;
       slicedata *slicei;
       int dir;
       int last_slice;
 
-      value = -(1000 + value);
-      submenutype=value/4;
-      dir=value%4;
-      submenutype=subslice_menuindex[submenutype];
-      slicei = sliceinfo + submenutype;
-      submenulabel = slicei->label.longlabel;
-      last_slice = nsliceinfo - 1;
-      for(i = nsliceinfo-1; i>=0; i--){
-        char *longlabel;
-
-        slicei = sliceinfo + i;
-        longlabel = slicei->label.longlabel;
-        if(strcmp(longlabel, submenulabel) != 0)continue;
-        if(dir != 0 && dir != slicei->idir)continue;
-        last_slice = i;
+      case UNLOAD_ALL:
+        for(i=0;i<nsliceinfo;i++){
+          slicei = sliceinfo + i;
+          if(slicei->loaded == 1){
+            if(slicei->slice_filetype == SLICE_GEOM){
+              ReadGeomData(slicei->patchgeom, slicei, UNLOAD, &errorcode);
+            }
+            else{
+              ReadSlice("",i,UNLOAD,DEFER_SLICECOLOR,&errorcode);
+            }
+          }
+        }
         break;
-      }
-      for(i = 0; i<nsliceinfo; i++){
-        char *longlabel;
-        int set_slicecolor;
+      case MENU_SHOWSLICE_IN_GAS:
+        show_slice_in_obst = ONLY_IN_GAS;
+        UpdateShowSliceInObst();
+        break;
+      case  MENU_SHOWSLICE_IN_GASANDSOLID:
+        show_slice_in_obst = GAS_AND_SOLID;
+        UpdateShowSliceInObst();
+        break;
+      case MENU_SHOWSLICE_IN_SOLID:
+        show_slice_in_obst = ONLY_IN_SOLID;
+        UpdateShowSliceInObst();
+        break;
+      case MENU_SLICE_SETTINGS:
+        ShowBoundsDialog(DLG_SLICE);
+        break;
+      default:
+        value = -(1000 + value);
+        submenutype=value/4;
+        dir=value%4;
+        submenutype=subslice_menuindex[submenutype];
+        slicei = sliceinfo + submenutype;
+        submenulabel = slicei->label.longlabel;
+        last_slice = nsliceinfo - 1;
+        for(i = nsliceinfo-1; i>=0; i--){
+          char *longlabel;
 
-        slicei = sliceinfo + i;
-        longlabel = slicei->label.longlabel;
-        if(strcmp(longlabel,submenulabel)!=0)continue;
-        if(dir!=0&&dir!=slicei->idir)continue;
-        set_slicecolor = DEFER_SLICECOLOR;
-        if(i == last_slice)set_slicecolor = SET_SLICECOLOR;
-        ReadSlice(slicei->file,i,LOAD,set_slicecolor,&errorcode);
+          slicei = sliceinfo + i;
+          longlabel = slicei->label.longlabel;
+          if(strcmp(longlabel, submenulabel) != 0)continue;
+          if(dir != 0 && dir != slicei->idir)continue;
+          last_slice = i;
+          break;
+        }
+        START_TIMER(load_time);
+        for(i = 0; i<nsliceinfo; i++){
+          char *longlabel;
+          int set_slicecolor;
+
+          slicei = sliceinfo + i;
+          longlabel = slicei->label.longlabel;
+          if(strcmp(longlabel,submenulabel)!=0)continue;
+          if(dir!=0&&dir!=slicei->idir)continue;
+          set_slicecolor = DEFER_SLICECOLOR;
+          if(i == last_slice)set_slicecolor = SET_SLICECOLOR;
+          if(slicei->slice_filetype == SLICE_GEOM){
+            load_size+=ReadGeomData(slicei->patchgeom, slicei, LOAD, &errorcode);
+          }
+          else{
+#ifdef pp_NEWBOUND_DIALOG
+            load_size+=ReadSliceUseGluiBounds(slicei->file,i,LOAD,set_slicecolor,&errorcode);
+#else
+            load_size+=ReadSlice(slicei->file,i,LOAD,set_slicecolor,&errorcode);
+#endif
+          }
+          file_count++;
+        }
+        STOP_TIMER(load_time);
+        PRINT_LOADTIMES(file_count,load_size,load_time);
       }
-    }
   }
   updatemenu=1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  CheckMemory;
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
 /* ------------------ LoadVMultiSliceMenu ------------------------ */
@@ -3911,9 +4576,12 @@ void LoadSliceMenu(int value){
 void LoadMultiVSliceMenu(int value){
   int i;
   multivslicedata *mvslicei;
+  int file_count = 0;
+  float load_size = 0.0, load_time;
 
   if(value==MENU_DUMMY)return;
   if(value>=0){
+
     mvslicei = multivsliceinfo + value;
     if(scriptoutstream!=NULL){
       if(mvslicei->nvslices>0){
@@ -3926,24 +4594,71 @@ void LoadMultiVSliceMenu(int value){
         script_multivslice=1;
       }
     }
-    if(scriptoutstream==NULL||defer_file_loading==0){
-      for(i=0;i<mvslicei->nvslices;i++){
+    if(scriptoutstream==NULL||script_defer_loading==0){
+      START_TIMER(load_time);
+      for(i = 0; i<mvslicei->nvslices; i++){
+        vslicedata *vslicei;
+
+        vslicei = vsliceinfo+mvslicei->ivslices[i];
+        vslicei->finalize = 0;
+      }
+      for(i = mvslicei->nvslices-1; i>=0; i--){
+        vslicedata *vslicei;
+
+        vslicei = vsliceinfo+mvslicei->ivslices[i];
+        if(vslicei->skip==0&&vslicei->loaded==0){
+          vslicei->finalize = 1;
+          break;
+        }
+      }
+      for(i = 0; i<mvslicei->nvslices; i++){
         vslicedata *vslicei;
 
         vslicei = vsliceinfo + mvslicei->ivslices[i];
-        if(vslicei->skip==0&&vslicei->loaded==0)LoadVSliceMenu(mvslicei->ivslices[i]);
+        if(vslicei->skip==0&&vslicei->loaded==0){
+          load_size+=LoadVSliceMenu2(mvslicei->ivslices[i]);
+          file_count++;
+        }
         if(vslicei->skip==1&&vslicei->loaded==1)UnloadVSliceMenu(mvslicei->ivslices[i]);
       }
+      STOP_TIMER(load_time);
+      PRINT_LOADTIMES(file_count,load_size,load_time);
     }
     script_multivslice=0;
   }
+  else if(value<=-1000){ // load multi v slice
+    int submenutype, dir;
+    char *submenulabel;
+    slicedata *slicei;
+
+    value = -(1000 + value);
+    submenutype=value/4-1;
+    dir=value%4;
+    submenutype=msubvslice_menuindex[submenutype];
+
+    slicei = sliceinfo + submenutype;
+    submenulabel = slicei->label.longlabel;
+    START_TIMER(load_time);
+    for(i = 0; i<nmultivsliceinfo; i++){
+      char *longlabel;
+      multivslicedata *mvslicei;
+      slicedata *slicej;
+      vslicedata *vslicej;
+
+      mvslicei = multivsliceinfo + i;
+      vslicej = vsliceinfo + mvslicei->ivslices[0];
+      slicej = sliceinfo+vslicej->ival;
+      longlabel = slicej->label.longlabel;
+      if(strcmp(longlabel,submenulabel)!=0)continue;
+      if(dir!=0&&dir!=slicej->idir)continue;
+      LoadMultiVSliceMenu(i);
+      file_count++;
+    }
+    STOP_TIMER(load_time);
+    PRINT_LOADTIMES(file_count,load_size,load_time);
+  }
   else{
     switch(value){
-      case -20:
-        showallslicevectors=1-showallslicevectors;
-        updatemenu=1;
-        glutPostRedisplay();
-        return;
       case UNLOAD_ALL:
         LoadVSliceMenu(UNLOAD_ALL);
         break;
@@ -3952,9 +4667,9 @@ void LoadMultiVSliceMenu(int value){
       if(vectorslicedup_option!=SLICEDUP_KEEPALL){
         vectorslicedup_option = SLICEDUP_KEEPALL;
         updatemenu = 1;
-        glutPostRedisplay();
+        GLUTPOSTREDISPLAY;
         UpdateVSliceDups();
-        update_slicedup_dialog();
+        UpdateSliceDupDialog();
       }
       break;
 
@@ -3962,9 +4677,9 @@ void LoadMultiVSliceMenu(int value){
       if(vectorslicedup_option!=SLICEDUP_KEEPCOARSE){
         vectorslicedup_option = SLICEDUP_KEEPCOARSE;
         updatemenu = 1;
-        glutPostRedisplay();
+        GLUTPOSTREDISPLAY;
         UpdateVSliceDups();
-        update_slicedup_dialog();
+        UpdateSliceDupDialog();
       }
       break;
 
@@ -3972,11 +4687,14 @@ void LoadMultiVSliceMenu(int value){
       if(vectorslicedup_option!=SLICEDUP_KEEPFINE){
         vectorslicedup_option = SLICEDUP_KEEPFINE;
         updatemenu = 1;
-        glutPostRedisplay();
+        GLUTPOSTREDISPLAY;
         UpdateVSliceDups();
-        update_slicedup_dialog();
+        UpdateSliceDupDialog();
       }
       break;
+      case MENU_LOADVSLICE_SETTINGS:
+        ShowBoundsDialog(DLG_SLICE);
+        break;
       default:
         ASSERT(FFALSE);
         break;
@@ -3986,30 +4704,119 @@ void LoadMultiVSliceMenu(int value){
 
 /* ------------------ LoadAllMSlices ------------------------ */
 
-void LoadAllMSlices(int last_slice, multislicedata *mslicei){
+FILE_SIZE LoadAllMSlices(int last_slice, multislicedata *mslicei){
   int i;
+  float load_time;
+  FILE_SIZE file_size = 0;
+  int file_count=0;
 
+  START_TIMER(load_time);
   for(i = 0; i < mslicei->nslices; i++){
     slicedata *slicei;
     int set_slicecolor;
 
     slicei = sliceinfo + mslicei->islices[i];
     set_slicecolor = DEFER_SLICECOLOR;
-    if(last_slice == i)set_slicecolor = SET_SLICECOLOR;
-    if(slicei->skip == 0 && slicei->loaded == 0){
-      LoadSlicei(set_slicecolor,mslicei->islices[i]);
+
+    slicei->finalize = 0;
+    if(last_slice==mslicei->islices[i]){
+      slicei->finalize = 1;
+      set_slicecolor = SET_SLICECOLOR;
+    }
+    if(slicei->skipdup== 0){
+      file_size += LoadSlicei(set_slicecolor,mslicei->islices[i]);
+      file_count++;
     }
   }
+  STOP_TIMER(load_time);
+  PRINT_LOADTIMES(file_count,(float)file_size,load_time);
+  return file_size;
 }
 
+#ifdef pp_SLICETHREAD
+/* ------------------ SetupSlice ------------------------ */
+
+int SetupSlice(int value){
+  int i, return_val;
+
+  return_val = 0;
+  for(i = 0; i<nsliceinfo; i++){
+    slicedata *slicei;
+
+    slicei = sliceinfo+i;
+    slicei->finalize = 0;
+    slicei->loadstatus = FILE_UNLOADED;
+    slicei->boundstatus = 0;
+    slicei->skipload = 1;
+  }
+
+  if(value>=0){
+    multislicedata *mslicei;
+
+    mslicei = multisliceinfo + value;
+    for(i = 0; i<mslicei->nslices; i++){
+      slicedata *slicei;
+
+      slicei = sliceinfo+mslicei->islices[i];
+      if(slicei->skipdup==0)slicei->skipload = 0;
+    }
+    for(i = mslicei->nslices-1; i >=0; i--){
+      slicedata *slicei;
+
+      slicei = sliceinfo + mslicei->islices[i];
+      if(slicei->skipdup== 0 && slicei->loaded == 0){
+        return_val = mslicei->islices[i];
+        slicei->finalize = 1;
+        break;
+      }
+    }
+  }
+  else if(value<=-1000){
+    int submenutype, dir;
+    char *submenulabel;
+    slicedata *slicei;
+
+    value = -(1000 + value);
+    submenutype=value/4;
+    dir=value%4;
+    submenutype=msubslice_menuindex[submenutype];
+    slicei = sliceinfo + submenutype;
+    submenulabel = slicei->label.longlabel;
+    for(i = 0; i<nsliceinfo; i++){
+      slicedata *slicei;
+      char *longlabel;
+
+      slicei = sliceinfo + i;
+      if(slicei->skipdup==1)continue;
+      longlabel = slicei->label.longlabel;
+      if(strcmp(longlabel, submenulabel) != 0)continue;
+      if(dir != 0 && dir != slicei->idir)continue;
+      if(dir !=0 && slicei->volslice == 1)continue;
+      slicei->skipload = 0;
+    }
+    for(i = nsliceinfo-1; i>=0; i--){
+      slicedata *slicei;
+
+      slicei = sliceinfo + i;
+      if(slicei->skipdup==0&&slicei->skipload==0){
+        slicei->finalize = 1;
+        return_val = i;
+        break;
+      }
+    }
+  }
+  return return_val;
+}
+#endif
 /* ------------------ LoadMultiSliceMenu ------------------------ */
 
 void LoadMultiSliceMenu(int value){
   int i;
-  multislicedata *mslicei;
 
   if(value==MENU_DUMMY)return;
   if(value>=0){
+    multislicedata *mslicei;
+
     mslicei = multisliceinfo + value;
     if(scriptoutstream!=NULL){
       if(mslicei->nslices>0){
@@ -4022,28 +4829,113 @@ void LoadMultiSliceMenu(int value){
         script_multislice=1;
       }
     }
-    if(scriptoutstream==NULL||defer_file_loading==0){
+    if(scriptoutstream==NULL||script_defer_loading==0){
       int last_slice;
+      FILE_SIZE total_size=0;
 
+#ifdef pp_SLICETHREAD
+      last_slice = SetupSlice(value);
+#else
       last_slice = mslicei->nslices - 1;
       for(i = mslicei->nslices-1; i >=0; i--){
         slicedata *slicei;
 
         slicei = sliceinfo + mslicei->islices[i];
-        if(slicei->skip == 0 && slicei->loaded == 0){
-          last_slice = i;
+        if(slicei->skipdup== 0){
+          last_slice = mslicei->islices[i];
           break;
         }
       }
+#endif
       for(i = 0; i < mslicei->nslices; i++){
         slicedata *slicei;
 
         slicei = sliceinfo + mslicei->islices[i];
-        if(slicei->skip == 1 && slicei->loaded == 1)UnloadSliceMenu(mslicei->islices[i]);
+        if(slicei->skipdup== 1 && slicei->loaded == 1){
+          UnloadSliceMenu(mslicei->islices[i]);
+        }
       }
-      LoadAllMSlices(last_slice,mslicei);
+      total_size = LoadAllMSlices(last_slice, mslicei);
+      if(compute_slice_file_sizes==1){
+        PRINTF(" size of slice files to be loaded=");
+        if(total_size>1000000000){
+          PRINTF("%.1f GB\n", (float)total_size/1000000000.);
+        }
+        else if(total_size>1000000){
+          PRINTF("%.1f MB\n", (float)total_size/1000000.);
+        }
+        else{
+          PRINTF("%.0f kB\n", (float)total_size/1000.);
+        }
+        PRINTF(" minimum network load time=%f s\n",(float)total_size*8.0/1000000000.0);
+        PRINTF("   (assuming a gigabit network connection)\n");
+      }
     }
     script_multislice=0;
+  }
+  else if(value<=-1000){
+    int submenutype, last_slice, dir, errorcode;
+    char *submenulabel;
+    slicedata *slicei;
+    float load_time, load_size = 0.0;
+    int file_count = 0;
+
+    value = -(1000 + value);
+    submenutype=value/4;
+    dir=value%4;
+    submenutype=msubslice_menuindex[submenutype];
+    slicei = sliceinfo + submenutype;
+    submenulabel = slicei->label.longlabel;
+#ifdef pp_SLICETHREAD
+    last_slice = SetupSlice(value);
+#else
+    last_slice = nsliceinfo - 1;
+    for(i = nsliceinfo-1; i>=0; i--){
+      char *longlabel;
+
+      slicei = sliceinfo + i;
+      if(slicei->skipdup == 1)continue;
+      longlabel = slicei->label.longlabel;
+      if(strcmp(longlabel, submenulabel) != 0)continue;
+      if(dir != 0 && dir != slicei->idir)continue;
+      if(dir !=0 && slicei->volslice == 1)continue;
+      last_slice = i;
+      break;
+    }
+#endif
+    START_TIMER(load_time);
+    for(i = 0; i<nsliceinfo; i++){
+      int set_slicecolor;
+#ifndef pp_SLICETHREAD
+      char *longlabel;
+#endif
+
+      slicei = sliceinfo + i;
+#ifdef pp_SLICETHREAD
+      if(slicei->skipload==1)continue;
+#else
+      if(slicei->skipdup== 1)continue;
+      longlabel = slicei->label.longlabel;
+      if(strcmp(longlabel,submenulabel)!=0)continue;
+      if(dir!=0&&dir!=slicei->idir)continue;
+      if(dir!=0&&slicei->volslice==1)continue;
+#endif
+      set_slicecolor = DEFER_SLICECOLOR;
+      if(i == last_slice)set_slicecolor = SET_SLICECOLOR;
+      if(slicei->slice_filetype == SLICE_GEOM){
+        load_size+=ReadGeomData(slicei->patchgeom, slicei, LOAD, &errorcode);
+      }
+      else{
+#ifdef pp_NEWBOUND_DIALOG
+        load_size+=ReadSliceUseGluiBounds(slicei->file,i,LOAD,set_slicecolor,&errorcode);
+#else
+        load_size+=ReadSlice(slicei->file,i,LOAD,set_slicecolor,&errorcode);
+#endif
+      }
+      file_count++;
+    }
+    STOP_TIMER(load_time);
+    PRINT_LOADTIMES(file_count,load_size,load_time);
   }
   else{
     switch(value){
@@ -4054,9 +4946,9 @@ void LoadMultiSliceMenu(int value){
       if(slicedup_option!=SLICEDUP_KEEPALL){
         slicedup_option = SLICEDUP_KEEPALL;
         updatemenu = 1;
-        glutPostRedisplay();
+        GLUTPOSTREDISPLAY;
         UpdateSliceDups();
-        update_slicedup_dialog();
+        UpdateSliceDupDialog();
       }
       break;
 
@@ -4064,9 +4956,9 @@ void LoadMultiSliceMenu(int value){
       if(slicedup_option!=SLICEDUP_KEEPCOARSE){
         slicedup_option = SLICEDUP_KEEPCOARSE;
         updatemenu = 1;
-        glutPostRedisplay();
+        GLUTPOSTREDISPLAY;
         UpdateSliceDups();
-        update_slicedup_dialog();
+        UpdateSliceDupDialog();
       }
       break;
 
@@ -4074,18 +4966,25 @@ void LoadMultiSliceMenu(int value){
       if(slicedup_option!=SLICEDUP_KEEPFINE){
         slicedup_option = SLICEDUP_KEEPFINE;
         updatemenu = 1;
-        glutPostRedisplay();
+        GLUTPOSTREDISPLAY;
         UpdateSliceDups();
-        update_slicedup_dialog();
+        UpdateSliceDupDialog();
       }
       break;
       case MENU_SLICECOLORDEFER:
         use_set_slicecolor = 1 - use_set_slicecolor;
         updatemenu = 1;
         break;
+      case MENU_SLICE_FILE_SIZES:
+        compute_slice_file_sizes = 1-compute_slice_file_sizes;
+        updatemenu = 1;
+        break;
+      case MENU_SLICE_SETTINGS:
+        ShowBoundsDialog(DLG_SLICE);
+        break;
       default:
-      ASSERT(FFALSE);
-      break;
+        ASSERT(FFALSE);
+        break;
     }
   }
 }
@@ -4096,7 +4995,8 @@ void Plot3DListMenu(int value){
   int i;
   plot3ddata *plot3di;
 
-  if(value<0||value>=nplot3dtimelist)return;
+  value = CLAMP(value, 0, nplot3dtimelist-1);
+  iplot3dtimelist = value;
   LoadPlot3dMenu(UNLOAD_ALL);
   if(scriptoutstream!=NULL){
     fprintf(scriptoutstream,"LOADPLOT3D\n");
@@ -4114,8 +5014,8 @@ void Plot3DListMenu(int value){
 
 void UpdateMenu(void){
   updatemenu=1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
 /* ------------------ LoadPlot3DMenu ------------------------ */
@@ -4125,7 +5025,7 @@ void LoadPlot3dMenu(int value){
   int i;
 
   if(value==MENU_PLOT3D_DUMMY)return;
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value>=0){
     char *plot3dfile;
 
@@ -4136,14 +5036,17 @@ void LoadPlot3dMenu(int value){
       fprintf(scriptoutstream," %i %f\n",
         plot3dinfo[value].blocknumber+1,plot3dinfo[value].time);
     }
-    if(scriptoutstream==NULL||defer_file_loading==0){
-      readplot3d(plot3dfile,value,LOAD,&errorcode);
+    if(scriptoutstream==NULL||script_defer_loading==0){
+      ReadPlot3D(plot3dfile,value,LOAD,&errorcode);
     }
   }
   else if(value==UNLOAD_ALL){
     for(i=0;i<nplot3dinfo;i++){
-      readplot3d("",i,UNLOAD,&errorcode);
+      ReadPlot3D("",i,UNLOAD,&errorcode);
     }
+  }
+  else if(value==MENU_PLOT3D_SETTINGS){
+    ShowBoundsDialog(DLG_PLOT3D);
   }
   else{
     value+=100000;
@@ -4152,17 +5055,20 @@ void LoadPlot3dMenu(int value){
     loadplot3dall=0;
   }
   updatemenu=1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
 /* ------------------ LoadIsoi ------------------------ */
 
-void LoadIsoi(int value){
+FILE_SIZE LoadIsoI(int value){
   char *file;
   isodata *isoi;
   int errorcode;
+  FILE_SIZE return_filesize = 0;
+  float total_time;
 
+  START_TIMER(total_time);
   ReadIsoFile=1;
   isoi = isoinfo + value;
   file=isoi->file;
@@ -4172,24 +5078,37 @@ void LoadIsoi(int value){
     fprintf(scriptoutstream, " %s\n", isoi->surface_label.longlabel);
     fprintf(scriptoutstream, " %i\n", isoi->blocknumber+1);
   }
-  if(scriptoutstream==NULL||defer_file_loading==0){
-    readiso(file,value,LOAD,NULL,&errorcode);
-    if(update_readiso_geom_wrapup == UPDATE_ISO_ONE_NOW)readiso_geom_wrapup();
+  CancelUpdateTriangles();
+  if(scriptoutstream==NULL||script_defer_loading==0){
+    return_filesize=ReadIso(file,value,LOAD,NULL,&errorcode);
+    if(update_readiso_geom_wrapup == UPDATE_ISO_ONE_NOW)ReadIsoGeomWrapup(BACKGROUND);
   }
   isoi->loading=0;
+  STOP_TIMER(total_time);
+  PRINTF(" - %.1f MB/%.1f s\n",(float)return_filesize/1000000.,total_time);
+  return return_filesize;
 }
 
   /* ------------------ LoadAllIsos ------------------------ */
 
 void LoadAllIsos(int iso_type){
   int i;
+  int file_count=0;
+  float load_time=0.0, load_size=0.0;
 
+  START_TIMER(load_time);
+  CancelUpdateTriangles();
   for(i = 0; i < nisoinfo; i++){
     isodata *isoi;
 
     isoi = isoinfo + i;
-    if(iso_type == isoi->type)LoadIsoi(i);
+    if(iso_type==isoi->type){
+      load_size+=LoadIsoI(i);
+      file_count++;
+    }
   }
+  STOP_TIMER(load_time);
+  PRINT_LOADTIMES(file_count,load_size,load_time);
 }
 
 /* ------------------ LoadIsoMenu ------------------------ */
@@ -4200,17 +5119,21 @@ void LoadIsoMenu(int value){
   int ii;
 
   if(value==MENU_DUMMY3)return;
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value>=0){
-    LoadIsoi(value);
+    LoadIsoI(value);
   }
   if(value==-1){
     for(i=0;i<nisoinfo;i++){
       isodata *isoi;
 
       isoi = isoinfo + i;
-      if(isoi->loaded==1)readiso("",i,UNLOAD,NULL,&errorcode);
+      if(isoi->loaded==1)ReadIso("",i,UNLOAD,NULL,&errorcode);
     }
+  }
+  if(value==MENU_ISO_SETTINGS){
+    ShowBoundsDialog(DLG_ISO);
+    return;
   }
   if(value<=-10){
     isodata *isoi;
@@ -4222,36 +5145,36 @@ void LoadIsoMenu(int value){
       fprintf(scriptoutstream,"LOADISO\n");
       fprintf(scriptoutstream," %s\n",isoi->surface_label.longlabel);
     }
-    if(scriptoutstream==NULL||defer_file_loading==0){
+    if(scriptoutstream==NULL||script_defer_loading==0){
       update_readiso_geom_wrapup = UPDATE_ISO_START_ALL;
       LoadAllIsos(isoi->type);
-      if(update_readiso_geom_wrapup == UPDATE_ISO_ALL_NOW)readiso_geom_wrapup();
+      if(update_readiso_geom_wrapup == UPDATE_ISO_ALL_NOW)ReadIsoGeomWrapup(BACKGROUND);
       update_readiso_geom_wrapup = UPDATE_ISO_OFF;
     }
     script_iso=0;
   }
   updatemenu=1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
-/* ------------------ LoadPatchMenu ------------------------ */
+/* ------------------ LoadBoundaryMenu ------------------------ */
 
-void LoadPatchMenu(int value){
+void LoadBoundaryMenu(int value){
   int errorcode;
   int i,ii;
-  int patchtypenew;
+  int boundarytypenew;
 
-  glutSetCursor(GLUT_CURSOR_WAIT);
+  GLUTSETCURSOR(GLUT_CURSOR_WAIT);
   if(value>=0){
-    patchtypenew=GetPatchType(patchinfo+value);
-    if(patchtypenew!=-1){
+    boundarytypenew=GetBoundaryType(patchinfo+value);
+    if(boundarytypenew!=-1){
       for(ii=0;ii<npatch_loaded;ii++){
         patchdata *patchi;
 
         i = patch_loaded_list[ii];
         patchi = patchinfo + i;
-        if(patchi->type!=patchtypenew)readpatch(i,UNLOAD,&errorcode);
+        if(patchi->shortlabel_index !=boundarytypenew)ReadBoundary(i,UNLOAD,&errorcode);
       }
     }
     if(scriptoutstream!=NULL){
@@ -4264,9 +5187,9 @@ void LoadPatchMenu(int value){
       fprintf(scriptoutstream, " %s\n", patchi->label.longlabel);
       fprintf(scriptoutstream, " %i\n", patchi->blocknumber+1);
     }
-    if(scriptoutstream==NULL||defer_file_loading==0){
+    if(scriptoutstream==NULL||script_defer_loading==0){
       LOCK_COMPRESS
-      readpatch(value,LOAD,&errorcode);
+      ReadBoundary(value,LOAD,&errorcode);
       UNLOCK_COMPRESS
     }
   }
@@ -4279,149 +5202,194 @@ void LoadPatchMenu(int value){
       fprintf(scriptoutstream,"LOADBOUNDARY\n");
       fprintf(scriptoutstream," %s\n",patchj->label.longlabel);
     }
-    if(scriptoutstream==NULL||defer_file_loading==0){
+    if(scriptoutstream==NULL||script_defer_loading==0){
+      int file_count=0;
+      float load_time=0.0, load_size=0.0;
+
+      START_TIMER(load_time);
       for(i=0;i<npatchinfo;i++){
         patchdata *patchi;
 
         patchi = patchinfo + i;
-        if(strcmp(patchi->label.longlabel,patchj->label.longlabel)==0&&patchi->filetype==patchj->filetype){
-          LOCK_COMPRESS
-          readpatch(i,LOAD,&errorcode);
-          UNLOCK_COMPRESS
+        if(strcmp(patchi->label.longlabel,patchj->label.longlabel)==0&&patchi->patch_filetype==patchj->patch_filetype){
+          LOCK_COMPRESS;
+          if(patchi->structured == YES){
+            PRINTF("Loading %s(%s)", patchi->file, patchi->label.shortlabel);
+          }
+          load_size+=ReadBoundary(i, LOAD, &errorcode);
+          file_count++;
+          UNLOCK_COMPRESS;
         }
       }
+      STOP_TIMER(load_time);
+      PRINT_LOADTIMES(file_count,load_size,load_time);
     }
     force_redisplay=1;
     UpdateFrameNumber(0);
   }
-  else if(value==MENU_UPDATEBOUNDS){
-    UpdateAllPatchBounds();
-  }
   else{
-    for(i=0;i<npatchinfo;i++){
-      readpatch(i,UNLOAD,&errorcode);
+    switch(value){
+    case MENU_BNDF_SHOW_MESH_INTERFACE:
+      show_bndf_mesh_interface = 1-show_bndf_mesh_interface;
+      updatemenu = 1;
+      break;
+    case MENU_UPDATEBOUNDS:
+      UpdateAllBoundaryBounds();
+      break;
+    case MENU_BOUNDARY_SETTINGS:
+      ShowBoundsDialog(DLG_BOUNDARY);
+      break;
+      case MENU_KEEP_ALL:
+      if(boundaryslicedup_option!=SLICEDUP_KEEPALL){
+        boundaryslicedup_option = SLICEDUP_KEEPALL;
+        updatemenu = 1;
+        GLUTPOSTREDISPLAY;
+        UpdateBoundarySliceDups();
+        UpdateSliceDupDialog();
+      }
+      break;
+
+      case  MENU_KEEP_COARSE:
+      if(boundaryslicedup_option!=SLICEDUP_KEEPCOARSE){
+        boundaryslicedup_option = SLICEDUP_KEEPCOARSE;
+        updatemenu = 1;
+        GLUTPOSTREDISPLAY;
+        UpdateBoundarySliceDups();
+        UpdateSliceDupDialog();
+      }
+      break;
+
+      case MENU_KEEP_FINE:
+      if(boundaryslicedup_option!=SLICEDUP_KEEPFINE){
+        boundaryslicedup_option = SLICEDUP_KEEPFINE;
+        updatemenu = 1;
+        GLUTPOSTREDISPLAY;
+        UpdateBoundarySliceDups();
+        UpdateSliceDupDialog();
+      }
+      break;
+    default:
+      for(i=0;i<npatchinfo;i++){
+        patchdata *patchi;
+
+        patchi = patchinfo+i;
+        if(patchi->filetype_label==NULL||strcmp(patchi->filetype_label, "INCLUDE_GEOM")!=0){
+          ReadBoundary(i, UNLOAD, &errorcode);
+        }
+      }
+      break;
     }
   }
   updatemenu=1;
-  glutPostRedisplay();
-  glutSetCursor(GLUT_CURSOR_LEFT_ARROW);
+  GLUTPOSTREDISPLAY;
+  GLUTSETCURSOR(GLUT_CURSOR_LEFT_ARROW);
 }
 
-/* ------------------ ShowPatchMenu ------------------------ */
+/* ------------------ ShowBoundaryMenu ------------------------ */
 
-void ShowPatchMenu(int value){
+void ShowBoundaryMenu(int value){
   updatemenu=1;
   updatefacelists=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   if(value>=1000){
-    patchdata *patchi;
+    int ii;
+    patchdata *patchj;
 
-    patchi=patchinfo+value-1000;
-    if(patchi->type==ipatchtype){
-      patchi->display=1-patchi->display;
+    patchj = patchinfo + value-1000;
+    patchj->display = 1 - patchj->display;
+    for(ii=0;ii<npatch_loaded;ii++){
+      patchdata *patchi;
+      int i;
+
+      i = patch_loaded_list[ii];
+      patchi = patchinfo + i;
+      if(strcmp(patchi->label.longlabel,patchj->label.longlabel)==0)patchi->display=patchj->display;
     }
-    else{
-      patchi->display=1;
-      ipatchtype=GetPatchType(patchi);
-    }
-    UpdatePatchType();
+    UpdateBoundaryType();
   }
   if(value==SHOW_CHAR){
     vis_threshold = 1 - vis_threshold;
-    updatechar();
+    UpdateChar();
   }
-  if(value==SHOWALL_BOUNDARY){
+  if(value==SHOWALL_BOUNDARY||value==GLUI_SHOWALL_BOUNDARY||value==GLUI_HIDEALL_BOUNDARY){
     int ii;
 
+    if(value == GLUI_SHOWALL_BOUNDARY)show_boundaryfiles = 1;
+    if(value == GLUI_HIDEALL_BOUNDARY)show_boundaryfiles = 0;
+    if(value==SHOWALL_BOUNDARY)show_boundaryfiles = 1-show_boundaryfiles;
     for(ii=0;ii<npatch_loaded;ii++){
       patchdata *patchi;
       int i;
 
       i = patch_loaded_list[ii];
       patchi = patchinfo + i;
-      patchi->display=1;
-    }
-  }
-  if(value==HIDEALL_BOUNDARY){
-    int ii;
-
-    for(ii=0;ii<npatch_loaded;ii++){
-      patchdata *patchi;
-      int i;
-
-      i = patch_loaded_list[ii];
-      patchi = patchinfo + i;
-      patchi->display=0;
+      if(patchi->structured == YES)patchi->display=show_boundaryfiles;
     }
   }
   if(value<0){
-    if(value==EXTERIORwallmenu){
-      int i,n,val;
+    if(value==ShowEXTERIORwallmenu||value==HideEXTERIORwallmenu){
+      int i,ii,val;
 
-      allexterior = 1-allexterior;
-      showexterior=1-showexterior;
-      val = allexterior;
-      for(n=0;n<current_mesh->npatches;n++){
-        if(current_mesh->patchtype[n]!=INTERIORwall){
-          current_mesh->visPatches[n]=val;
+      if(value==ShowEXTERIORwallmenu){
+        val = 1;
+      }
+      else{
+        val = 0;
+      }
+      for(ii = 0;ii < npatch_loaded;ii++){
+        int n;
+
+        patchdata *patchi;
+        meshdata *meshi;
+
+        patchi = patchinfo + patch_loaded_list[ii];
+        meshi = meshinfo + patchi->blocknumber;
+        for(n = 0;n < meshi->npatches;n++){
+          if(meshi->boundarytype[n] != INTERIORwall){
+            meshi->vis_boundaries[n] = val;
+          }
         }
       }
       for(i=1;i<7;i++){
-        visPatchType[i]=val;
+        vis_boundary_type[i]=val;
       }
     }
     else if(value==INTERIORwallmenu){
-      int n,val;
+      int ii,val;
 
       allinterior = 1 - allinterior;
       val = allinterior;
-      visPatchType[INTERIORwall]=val;
-      for(n=0;n<current_mesh->npatches;n++){
-        if(current_mesh->patchtype[n]==INTERIORwall){
-          current_mesh->visPatches[n]=val;
+      vis_boundary_type[INTERIORwall]=val;
+      for(ii = 0;ii < npatch_loaded;ii++){
+        patchdata *patchi;
+        meshdata *meshi;
+        int n;
+
+        patchi = patchinfo + patch_loaded_list[ii];
+        meshi = meshinfo + patchi->blocknumber;
+        for(n = 0;n < meshi->npatches;n++){
+          if(meshi->boundarytype[n] == INTERIORwall){
+            meshi->vis_boundaries[n] = val;
+          }
         }
       }
     }
-    else if(value == SOLIDpatchmenu){
-      show_patch_solid = 1 - show_patch_solid;
-    }
-    else if(value == OUTLINEpatchmenu){
-      show_patch_outline = 1 - show_patch_outline;
-    }
-    else if(value == POINTSpatchmenu){
-      show_patch_verts = 1 - show_patch_verts;
-    }
-    else if(value==INSOLIDpatchmenu){
-      show_patch_insolid = 1-show_patch_insolid;
-    }
-    else if(value==INGASpatchmenu){
-      show_patch_ingas = 1-show_patch_ingas;
-    }
-    else if(value == INCUTCELLpatchmenu){
-      show_patch_incutcell = 1 - show_patch_incutcell;
-    }
-    else if(value==SHOWCUTCELLPOLYGONSpatchmenu){
-      show_patch_incutcell = 1;
-      show_patch_cutcell_polygon = 1;
-      show_patch_outline = 1;
-    }
-    else if(value == SHOWCUTCELLTRIANGLESpatchmenu){
-      show_patch_incutcell = 1;
-      show_patch_cutcell_polygon = 0;
-      show_patch_outline = 1;
-    }
-    else if(value == HIDECUTCELLTRIANGLESpatchmenu){
-      show_patch_cutcell_polygon = 0;
-      show_patch_outline = 0;
-    }
     else if(value != DUMMYwallmenu){
-      int n;
+      int ii;
 
-      value = -(value+2); /* map xxxwallmenu to xxxwall */
-      for(n=0;n<current_mesh->npatches;n++){
-        if(current_mesh->patchtype[n]==value){
-          current_mesh->visPatches[n] = 1 - current_mesh->visPatches[n];
-          visPatchType[value]=current_mesh->visPatches[n];
+      value = -(value + 2); /* map xxxwallmenu to xxxwall */
+      for(ii = 0;ii < npatch_loaded;ii++){
+        patchdata *patchi;
+        meshdata *meshi;
+        int n;
+
+        patchi = patchinfo + patch_loaded_list[ii];
+        meshi = meshinfo + patchi->blocknumber;
+        for(n = 0;n < meshi->npatches;n++){
+          if(meshi->boundarytype[n] == value){
+            meshi->vis_boundaries[n] = 1 - meshi->vis_boundaries[n];
+            vis_boundary_type[value] = meshi->vis_boundaries[n];
+          }
         }
       }
     }
@@ -4490,7 +5458,7 @@ void VentMenu(int value){
   }
   updatefacelists=1;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 #define GEOMETRY_SOLID 0
 #define GEOMETRY_OUTLINE 1
@@ -4505,13 +5473,20 @@ void VentMenu(int value){
 #define GEOMETRY_SHOWDIAGNOSTICS 13
 #define GEOMETRY_HILIGHTSKINNY 5
 #define GEOMETRY_HIDEALL 8
+#define GEOMETRY_INSIDE_DOMAIN 14
+#define GEOMETRY_OUTSIDE_DOMAIN 15
+#define GEOMETRY_FACES_INTERIOR 16
+#define GEOMETRY_FACES_EXTERIOR 17
+#define GEOMETRY_VOLUMES_INTERIOR 18
+#define GEOMETRY_VOLUMES_EXTERIOR 19
+#define GEOMETRY_DUMMY -999
 
 /* ------------------ ImmersedMenu ------------------------ */
 
 void ImmersedMenu(int value){
+  if(value==GEOMETRY_DUMMY)return;
   updatemenu=1;
   switch(value){
-
     case GEOMETRY_INTERIOR_SOLID:
       show_volumes_solid=1-show_volumes_solid;
       break;
@@ -4523,48 +5498,48 @@ void ImmersedMenu(int value){
       show_volumes_outline=0;
       break;
     case GEOMETRY_SOLIDOUTLINE:
-      if(show_faces_solid==1&&show_faces_outline==1){
-        show_faces_solid=1;
+      if(show_faces_shaded==1&&show_faces_outline==1){
+        show_faces_shaded=1;
         show_faces_outline=0;
       }
       else{
-        show_faces_solid=1;
+        show_faces_shaded=1;
         show_faces_outline=1;
       }
       break;
     case GEOMETRY_SOLID:
-      if(show_faces_solid==1&&show_faces_outline==1){
-        show_faces_solid=1;
+      if(show_faces_shaded==1&&show_faces_outline==1){
+        show_faces_shaded=1;
         show_faces_outline=0;
       }
-      else if(show_faces_solid==1&&show_faces_outline==0){
-        show_faces_solid=0;
+      else if(show_faces_shaded==1&&show_faces_outline==0){
+        show_faces_shaded=0;
         show_faces_outline=1;
       }
-      else if(show_faces_solid==0&&show_faces_outline==1){
-        show_faces_solid=1;
+      else if(show_faces_shaded==0&&show_faces_outline==1){
+        show_faces_shaded=1;
         show_faces_outline=0;
       }
       else{
-        show_faces_solid=1;
+        show_faces_shaded=1;
         show_faces_outline=0;
       }
       break;
     case GEOMETRY_OUTLINE:
-      if(show_faces_solid==1&&show_faces_outline==1){
-        show_faces_solid=0;
+      if(show_faces_shaded==1&&show_faces_outline==1){
+        show_faces_shaded=0;
         show_faces_outline=1;
       }
-      else if(show_faces_solid==1&&show_faces_outline==0){
-        show_faces_solid=0;
+      else if(show_faces_shaded==1&&show_faces_outline==0){
+        show_faces_shaded=0;
         show_faces_outline=1;
       }
-      else if(show_faces_solid==0&&show_faces_outline==1){
-        show_faces_solid=1;
+      else if(show_faces_shaded==0&&show_faces_outline==1){
+        show_faces_shaded=1;
         show_faces_outline=0;
       }
       else{
-        show_faces_solid=0;
+        show_faces_shaded=0;
         show_faces_outline=1;
       }
       break;
@@ -4584,7 +5559,7 @@ void ImmersedMenu(int value){
       show_geometry_diagnostics = 1 - show_geometry_diagnostics;
       break;
     case GEOMETRY_HIDE:
-      show_faces_solid=0;
+      show_faces_shaded=0;
       show_faces_outline=0;
       break;
     case GEOMETRY_HIDEALL:
@@ -4594,13 +5569,37 @@ void ImmersedMenu(int value){
       break;
     case MENU_DUMMY:
       break;
+    case GEOMETRY_INSIDE_DOMAIN:
+      showgeom_inside_domain = 1 - showgeom_inside_domain;
+      UpdateWhereFaceVolumes();
+      break;
+    case GEOMETRY_OUTSIDE_DOMAIN:
+      showgeom_outside_domain = 1 - showgeom_outside_domain;
+      UpdateWhereFaceVolumes();
+      break;
+    case GEOMETRY_FACES_INTERIOR:
+      show_faces_interior = 1 - show_faces_interior;
+      UpdateWhereFaceVolumes();
+      break;
+    case GEOMETRY_FACES_EXTERIOR:
+      show_faces_exterior = 1 - show_faces_exterior;
+      UpdateWhereFaceVolumes();
+      break;
+    case GEOMETRY_VOLUMES_INTERIOR:
+      show_volumes_interior = 1 - show_volumes_interior;
+      UpdateWhereFaceVolumes();
+      break;
+    case GEOMETRY_VOLUMES_EXTERIOR:
+      show_volumes_exterior = 1 - show_volumes_exterior;
+      UpdateWhereFaceVolumes();
+      break;
     default:
       ASSERT(FFALSE);
       break;
   }
-  update_geometry_controls();
+  UpdateGeometryControls();
 
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ BlockageMenu ------------------------ */
@@ -4611,6 +5610,7 @@ void BlockageMenu(int value){
   if(value==visLightFaces){
     light_faces = 1 - light_faces;
     updatemenu=1;
+    GLUTPOSTREDISPLAY;
     return;
   }
   if(solid_state<0)solid_state=visBlocks;
@@ -4702,7 +5702,7 @@ void BlockageMenu(int value){
    case visBLOCKAsInputOutline:
    case visBLOCKAsInput:
      visBlocks=value;
-     update_trainer_outline();
+     UpdateTrainerOutline();
      break;
    case visBLOCKNormal:
    case visBLOCKOutline:
@@ -4710,7 +5710,7 @@ void BlockageMenu(int value){
    case visBLOCKSolidOutline:
      visBlocks=value;
      if(value==visBLOCKSolidOutline||visBLOCKold==visBLOCKSolidOutline)updatefaces=1;
-     update_trainer_outline();
+     UpdateTrainerOutline();
      break;
    case BLOCKlocation_grid:
    case BLOCKlocation_exact:
@@ -4743,39 +5743,76 @@ void BlockageMenu(int value){
  // updatefaces=1;
   updatefacelists=1;
   updatehiddenfaces=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ RotateTypeMenu ------------------------ */
 
 void RotateTypeMenu(int value){
   if(value==MENU_DUMMY)return;
-  rotation_type = value;
-  UpdateRotationType(rotation_type);
-  RotationTypeCB(rotation_type);
-  updatemenu=1;
-  glutPostRedisplay();
+  if(value==MENU_MOTION_SETTINGS){
+    ShowGluiMotion(DIALOG_MOTION);
+    return;
+  }
+  else if(value == MENU_MOTION_SHOW_VECTORS){
+	showgravity_vector = 1-showgravity_vector;
+	UpdateShowGravityVector();
+  }
+  else if(value == MENU_MOTION_GRAVITY_VECTOR){
+    gvec_down = 1;
+#define USE_GVEC 28
+    SceneMotionCB(USE_GVEC);
+  }
+  else if(value==MENU_MOTION_Z_VECTOR){
+#define ZAXIS_UP 41
+    SceneMotionCB(ZAXIS_UP);
+  }
+  else{
+    rotation_type = value;
+    UpdateRotationType(rotation_type);
+    RotationTypeCB(rotation_type);
+  }
+  updatemenu = 1;
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ TitleMenu ------------------------ */
 
 void TitleMenu(int value){
+  if(value == MENU_DUMMY)return;
+  GLUTPOSTREDISPLAY;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
   switch(value){
-  case 0:
-    visTitle = 1 - visTitle;
+  case MENU_TITLE_title_smv_version:
+    vis_title_smv_version =1-vis_title_smv_version;
     break;
-  case 3:
-    visTitle=1;
+  case MENU_TITLE_chid:
+    vis_title_CHID=1-vis_title_CHID;
     break;
-  case 4:
-    visTitle=0;
+  case MENU_TITLE_title_fds:
+    vis_title_fds=1-vis_title_fds;
+    break;
+  case MENU_TITLE_gversion:
+    vis_title_gversion =1-vis_title_gversion;
+    break;
+  case MENU_TITLE_show_all:
+    vis_title_smv_version = 1;
+    vis_title_CHID        = 1;
+    vis_title_fds         = 1;
+    vis_title_gversion    = 1;
+    break;
+  case MENU_TITLE_hide_all:
+    vis_title_smv_version = 0;
+    vis_title_CHID        = 0;
+    vis_title_fds         = 0;
+    vis_title_gversion    = 0;
     break;
   default:
     ASSERT(FFALSE);
     break;
   }
+  SetLabelControls();
 }
 
 /* ------------------ ShowObjectsMenu ------------------------ */
@@ -4812,7 +5849,7 @@ void ShowObjectsMenu(int value){
   }
   else if(value==OBJECT_ORIENTATION){
     show_device_orientation=1-show_device_orientation;
-    update_device_orientation();
+    UpdateDeviceOrientation();
   }
   else if(value == OBJECT_SHOWBEAM){
     showbeam_as_line = 1 - showbeam_as_line;
@@ -4822,11 +5859,11 @@ void ShowObjectsMenu(int value){
   }
   else{
     device_sphere_segments=ABS(value);
-    Init_Sphere(device_sphere_segments,2*device_sphere_segments);
-    Init_Circle(2*device_sphere_segments,&object_circ);
+    InitSphere(device_sphere_segments,2*device_sphere_segments);
+    InitCircle(2*device_sphere_segments,&object_circ);
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ ZoneShowMenu ------------------------ */
@@ -4871,6 +5908,12 @@ void ZoneShowMenu(int value){
     zonecolortype=ZONESMOKE_COLOR;
     visSZone=1;
     visZone=1;
+    break;
+  case MENU_ZONE_WALLS:
+    vis_wall_data = 1-vis_wall_data;
+    break;
+  case MENU_ZONE_TARGETS:
+    vis_target_data = 1-vis_target_data;
     break;
   case MENU_ZONE_VENTS:
     visVentFlow=1-visVentFlow;
@@ -4932,7 +5975,7 @@ void ZoneShowMenu(int value){
     ASSERT(FFALSE);
   }
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 #define GEOM_Vents 15
@@ -4964,8 +6007,6 @@ void GeometryMenu(int value){
     break;
 
   case 17+TERRAIN_3D:
-  case 17+TERRAIN_2D_STEPPED:
-  case 17+TERRAIN_2D_LINE:
   case 17+TERRAIN_3D_MAP:
   case 17+TERRAIN_HIDDEN:
     if(value==17+TERRAIN_HIDDEN){
@@ -4987,7 +6028,7 @@ void GeometryMenu(int value){
     else{
       planar_terrain_slice=1;
     }
-    Update_Glui_Wui();
+    UpdateGluiWui();
     break;
   case GEOM_ShowAll:
     if(isZoneFireModel)visFrame=1;
@@ -4996,6 +6037,7 @@ void GeometryMenu(int value){
     visWalls=1;
     visCeiling=1;
     */
+    show_faces_shaded=1;
     visVents=1;
     BlockageMenu(visBLOCKAsInput);
     break;
@@ -5007,6 +6049,7 @@ void GeometryMenu(int value){
     visVents=0;
     visGrid=0;
     BlockageMenu(visBLOCKHide);
+    ImmersedMenu(GEOMETRY_HIDEALL);
     break;
   case GEOM_Vents:
     visVents=1-visVents;
@@ -5020,7 +6063,7 @@ void GeometryMenu(int value){
   }
   updatefacelists=1;
   updatemenu=1;
-  glutPostRedisplay();
+  GLUTPOSTREDISPLAY;
 }
 
 /* ------------------ GetNumActiveDevices ------------------------ */
@@ -5056,9 +6099,9 @@ int GetNTotalVents(void){
   return ntotal_vents;
 }
 
-/* ------------------ IsPatchType ------------------------ */
+/* ------------------ IsBoundaryType ------------------------ */
 
-int IsPatchType(int type){
+int IsBoundaryType(int type){
   int i;
 
   for(i = 0; i < nmeshes; i++){
@@ -5067,7 +6110,7 @@ int IsPatchType(int type){
 
     meshi = meshinfo + i;
     for(n = 0; n < meshi->npatches; n++){
-      if(meshi->patchtype[n] == type)return 1;
+      if(meshi->boundarytype[n] == type)return 1;
     }
   }
   return 0;
@@ -5077,20 +6120,17 @@ int IsPatchType(int type){
 
 void InitMenus(int unload){
   int i;
-  int nsmoke3dloaded,nvolsmoke3dloaded;
-  int nsliceloaded,nvsliceloaded2,nvsliceloaded,nmultisliceloaded;
-  int nvslice0, nvslice1, nvslice2,nvsliceloaded0,nvsliceloaded1;
-  int npartloaded,npart5loaded,nevacloaded;
-  int npatchloaded;
-  int nplot3dloaded;
-  int nisoloaded;
+  int nmultisliceloaded;
   int showhide_data = 0;
+  int patchgeom_slice_showhide;
+
 
 static int filesdialogmenu = 0, viewdialogmenu = 0, datadialogmenu = 0, windowdialogmenu=0;
-static int labelmenu=0, colorbarmenu=0, colorbarsmenu=0, colorbarshademenu, smokecolorbarmenu=0, showhidemenu=0;
+static int labelmenu=0, titlemenu=0, colorbarmenu=0, colorbarsmenu=0, colorbarshademenu, smokecolorbarmenu=0, showhidemenu=0;
 static int optionmenu=0, rotatetypemenu=0;
 static int resetmenu=0, frameratemenu=0, rendermenu=0, smokeviewinimenu=0, inisubmenu=0, resolutionmultipliermenu=0;
-static int startrenderingmenu=0;
+static int render_resolutionmenu=0, render_filetypemenu=0, render_filesuffixmenu=0, render_skipmenu=0;
+static int render_startmenu = 0;
 #ifdef pp_COMPRESS
 static int compressmenu=0;
 #endif
@@ -5100,7 +6140,10 @@ static int vectorskipmenu=0,unitsmenu=0;
 static int isosurfacemenu=0, isovariablemenu=0, levelmenu=0;
 static int fontmenu=0, aperturemenu=0,dialogmenu=0,zoommenu=0;
 static int gridslicemenu=0, blockagemenu=0, immersedmenu=0, immersedinteriormenu=0, immersedsurfacemenu=0, loadpatchmenu=0, ventmenu=0, circularventmenu=0;
-static int loadisomenu=0, isosurfacetypemenu=0;
+static int loadpatchsinglemenu=0,loadsmoke3dsinglemenu=0,loadvolsmokesinglemenu=0,unloadsmoke3dsinglemenu=0, showvolsmokesinglemenu=0;
+static int plot3dshowsinglemeshmenu=0;
+static int showsingleslicemenu=0,plot3dsinglemeshmenu=0;
+static int loadisomenu=0, isosinglemeshmenu=0, isosurfacetypemenu=0,showpatchsinglemenu=0,showpatchextmenu=0;
 static int geometrymenu=0, loadunloadmenu=0, reloadmenu=0, aboutmenu=0, disclaimermenu=0, terrain_showmenu=0;
 static int scriptmenu=0;
 static int scriptlistmenu=0,scriptsteplistmenu=0,scriptrecordmenu=0;
@@ -5109,23 +6152,27 @@ static int luascriptmenu=0;
 static int luascriptlistmenu=0;
 #endif
 static int loadplot3dmenu=0, unloadvslicemenu=0, unloadslicemenu=0;
-static int loadterrainmenu=0, unloadterrainmenu=0;
-static int loadsmoke3dmenu=0,loadsmoke3dsootmenu=0,loadsmoke3dhrrmenu=0,loadsmoke3dwatermenu=0;
+static int loadsmoke3dmenu=0,loadsmoke3dsootmenu=0,loadsmoke3dhrrmenu=0;
+static int loadsmoke3dtempmenu = 0, loadsmoke3dco2menu = 0;
 static int loadvolsmoke3dmenu=0,showvolsmoke3dmenu=0;
 static int unloadsmoke3dmenu=0,unloadvolsmoke3dmenu=0;
 static int unloadevacmenu=0, unloadpartmenu=0, loadslicemenu=0, loadmultislicemenu=0;
 static int *loadsubvslicemenu=NULL, nloadsubvslicemenu=0;
 static int *loadsubslicemenu=NULL, nloadsubslicemenu=0, iloadsubslicemenu=0;
+static int *loadsubpatchmenu_b = NULL, *nsubpatchmenus_b=NULL, iloadsubpatchmenu_b=0, nloadsubpatchmenu_b = 0;
+static int *loadsubpatchmenu_s = NULL, *nsubpatchmenus_s=NULL, iloadsubpatchmenu_s=0, nloadsubpatchmenu_s = 0;
 static int *loadsubmslicemenu=NULL, nloadsubmslicemenu=0;
 static int *loadsubmvslicemenu=NULL, nloadsubmvslicemenu=0;
 static int *loadsubplot3dmenu=NULL, nloadsubplot3dmenu=0;
 static int loadmultivslicemenu=0, unloadmultivslicemenu=0;
-static int unloadmultislicemenu=0, vslicemenu=0, staticslicemenu=0;
+static int duplicatevectorslicemenu=0, duplicateslicemenu=0, duplicateboundaryslicemenu=0;
+static int unloadmultislicemenu=0, vsliceloadmenu=0, staticslicemenu=0;
 static int evacmenu=0, particlemenu=0, particlesubmenu=0, showpatchmenu=0, zonemenu=0, isoshowmenu=0, isoshowsubmenu=0, isolevelmenu=0, smoke3dshowmenu=0;
+static int smoke3dshowsinglemenu = 0;
 static int particlepropshowmenu=0,humanpropshowmenu=0;
 static int *particlepropshowsubmenu=NULL;
 static int particlestreakshowmenu=0;
-static int tourmenu=0;
+static int tourmenu=0,tourcopymenu=0;
 static int avatartourmenu=0,avatarevacmenu=0;
 static int trainerviewmenu=0,mainmenu=0,zoneshowmenu=0,particleshowmenu=0,evacshowmenu=0;
 static int showobjectsmenu=0,spheresegmentmenu=0,propmenu=0;
@@ -5142,45 +6189,8 @@ updatemenu=0;
   PRINTF("Updating Menus %i In menu %i\n",menu_count++,in_menu);
   in_menu=1;
 #endif
-  update_showhidebuttons();
-  glutPostRedisplay();
-
-  nsliceloaded=0;
-  for(i=0;i<nsliceinfo;i++){
-    slicedata *sd;
-
-    sd = sliceinfo + i;
-    if(sd->loaded==1)nsliceloaded++;
-  }
-
-  nsmoke3dloaded=0;
-  for(i=0;i<nsmoke3dinfo;i++){
-    smoke3ddata *smoke3di;
-
-    smoke3di=smoke3dinfo+i;
-    if(smoke3di->loaded==1)nsmoke3dloaded++;
-  }
-
-  nvolsmoke3dloaded=0;
-  for(i=0;i<nmeshes;i++){
-    meshdata *meshi;
-    volrenderdata *vr;
-
-    meshi = meshinfo + i;
-    vr = &(meshi->volrenderinfo);
-    if(vr->fireslice==NULL||vr->smokeslice==NULL)continue;
-    if(vr->loaded==1){
-      nvolsmoke3dloaded++;
-    }
-  }
-
-  nvsliceloaded=0;
-  for(i=0;i<nvsliceinfo;i++){
-    vslicedata *vd;
-
-    vd = vsliceinfo + i;
-    if(vd->loaded==1)nvsliceloaded++;
-  }
+  UpdateShowHideButtons();
+  GLUTPOSTREDISPLAY;
 
   for(i=0;i<nmultisliceinfo;i++){
     multislicedata *mslicei;
@@ -5237,50 +6247,32 @@ updatemenu=0;
     }
   }
 
+#ifdef pp_DEBUG_SUBMENU
 
-  npart5loaded=0;
-  npartloaded=0;
-  nevacloaded=0;
-  for(i=0;i<npartinfo;i++){
-    partdata *parti;
-
-    parti = partinfo+i;
-    if(parti->loaded==1&&parti->evac==0)npartloaded++;
-    if(parti->loaded==1&&parti->evac==1)nevacloaded++;
-    if(parti->loaded==1){
-      npart5loaded++;
-    }
+#define CREATEMENU(menu,Menu) menu=glutCreateMenu(Menu);\
+  if(nmenus<10000){\
+    strcpy(menuinfo[nmenus].label,#Menu);\
+    menuinfo[nmenus].menuvar_ptr=&menu;\
+    menuinfo[nmenus++].menuvar = menu;\
   }
 
-  nplot3dloaded=0;
-  for(i=0;i<nplot3dinfo;i++){
-    plot3ddata *plot3di;
+#ifdef _DEBUG
+#define GLUTADDSUBMENU(menu_label,menu_value){ASSERT(menu_value!=0);glutAddSubMenu(menu_label,menu_value);}
+#else
+#define GLUTADDSUBMENU(menu_label,menu_value){if(menu_value==0){printf("*** warning: sub-menu entry %s added to non-existant menu at line %i in file %s\n",menu_label,__LINE__,__FILE__);};glutAddSubMenu(menu_label,menu_value);}
+#endif
 
-    plot3di = plot3dinfo + i;
-    if(plot3di->loaded==1)nplot3dloaded++;
-  }
-
-  nisoloaded=0;
-  for(i=0;i<nisoinfo;i++){
-    isodata *isoi;
-
-    isoi = isoinfo + i;
-    if(isoi->loaded==1)nisoloaded++;
-  }
-
-  npatchloaded=0;
-  for(i=0;i<npatchinfo;i++){
-    patchdata *patchi;
-
-    patchi = patchinfo + i;
-    if(patchi->loaded==1)npatchloaded++;
-  }
+#else
 
 #define CREATEMENU(menu,Menu) menu=glutCreateMenu(Menu);\
   if(nmenus<10000){\
     strcpy(menuinfo[nmenus].label,#Menu);\
     menuinfo[nmenus++].menuvar=menu;\
   }
+
+#define GLUTADDSUBMENU(menu_label,menu_value) glutAddSubMenu(menu_label,menu_value)
+
+#endif
 
   {
     for(i=0;i<nmenus;i++){
@@ -5290,9 +6282,20 @@ updatemenu=0;
 
       if(menui->menuvar>0){
         glutDestroyMenu(menui->menuvar);
+#ifdef pp_DEBUG_SUBMENU
+        *(menui->menuvar_ptr) = 0;
+#endif
       }
     }
     nmenus=0;
+  }
+  if(nloadsubpatchmenu_b > 0){
+    FREEMEMORY(loadsubpatchmenu_b);
+    FREEMEMORY(nsubpatchmenus_b);
+  }
+  if(nloadsubpatchmenu_s>0){
+    FREEMEMORY(loadsubpatchmenu_s);
+    FREEMEMORY(nsubpatchmenus_s);
   }
   if(nloadsubslicemenu>0){
     FREEMEMORY(loadsubslicemenu);
@@ -5312,35 +6315,124 @@ updatemenu=0;
   }
   if(unload==UNLOAD)return;
 
+  patchgeom_slice_showhide = 0;
+  for(i=0;i<npatchinfo;i++){
+    patchdata *patchi;
 
+    patchi = patchinfo+i;
+    if(patchi->loaded==1){
+      if(patchi->filetype_label!=NULL&&strcmp(patchi->filetype_label, "INCLUDE_GEOM")==0){
+        patchgeom_slice_showhide = 1;
+      }
+    }
+  }
 
 /* --------------------------------patch menu -------------------------- */
   if(npatchinfo>0){
-    int npatchslice = 0;
+    int ii;
+    char menulabel[1024];
+    int next_total=0;
 
-    CREATEMENU(showpatchmenu,ShowPatchMenu);
+    CREATEMENU(showpatchsinglemenu,ShowBoundaryMenu);
+    for(ii=0;ii<npatchinfo;ii++){
+      patchdata *patchi;
+
+      i = patchorderindex[ii];
+      patchi = patchinfo+i;
+      if(patchi->loaded==0)continue;
+      STRCPY(menulabel, "");
+      if(patchi->display==1&&patchi->shortlabel_index ==iboundarytype){
+        STRCAT(menulabel,"*");
+      }
+      STRCAT(menulabel,patchi->menulabel);
+      glutAddMenuEntry(menulabel,1000+i);
+    }
+
+    CREATEMENU(showpatchextmenu, ShowBoundaryMenu);
+      for(i=1;i<7;i++){
+        next_total+=vis_boundary_type[i];
+      }
+    if(next_total == 6){
+      glutAddMenuEntry(_("*Show all"),  ShowEXTERIORwallmenu);
+      glutAddMenuEntry(_("Hide all"),   HideEXTERIORwallmenu);
+    }
+    else if(next_total == 0){
+      glutAddMenuEntry(_("Show all"),  ShowEXTERIORwallmenu);
+      glutAddMenuEntry(_("*Hide all"), HideEXTERIORwallmenu);
+    }
+    else{
+      glutAddMenuEntry(_("#Show all"),  ShowEXTERIORwallmenu);
+      glutAddMenuEntry(_("#Hide all"),  HideEXTERIORwallmenu);
+    }
+    if(IsBoundaryType(FRONTwall) == 1 && vis_boundary_type[FRONTwall] == 1)glutAddMenuEntry(_("*Front"), FRONTwallmenu);
+    if(IsBoundaryType(FRONTwall) == 1 && vis_boundary_type[FRONTwall] == 0)glutAddMenuEntry(_("Front"), FRONTwallmenu);
+    if(IsBoundaryType(BACKwall) == 1 && vis_boundary_type[BACKwall] == 1)glutAddMenuEntry(_("*Back"), BACKwallmenu);
+    if(IsBoundaryType(BACKwall) == 1 && vis_boundary_type[BACKwall] == 0)glutAddMenuEntry(_("Back"), BACKwallmenu);
+    if(IsBoundaryType(LEFTwall) == 1 && vis_boundary_type[LEFTwall] == 1)glutAddMenuEntry(_("*Left"), LEFTwallmenu);
+    if(IsBoundaryType(LEFTwall) == 1 && vis_boundary_type[LEFTwall] == 0)glutAddMenuEntry(_("Left"), LEFTwallmenu);
+    if(IsBoundaryType(RIGHTwall) == 1 && vis_boundary_type[RIGHTwall] == 1)glutAddMenuEntry(_("*Right"), RIGHTwallmenu);
+    if(IsBoundaryType(RIGHTwall) == 1 && vis_boundary_type[RIGHTwall] == 0)glutAddMenuEntry(_("Right"), RIGHTwallmenu);
+    if(IsBoundaryType(UPwall) == 1 && vis_boundary_type[UPwall] == 1)glutAddMenuEntry(_("*Up"), UPwallmenu);
+    if(IsBoundaryType(UPwall) == 1 && vis_boundary_type[UPwall] == 0)glutAddMenuEntry(_("Up"), UPwallmenu);
+    if(IsBoundaryType(DOWNwall) == 1 && vis_boundary_type[DOWNwall] == 1)glutAddMenuEntry(_("*Down"), DOWNwallmenu);
+    if(IsBoundaryType(DOWNwall) == 1 && vis_boundary_type[DOWNwall] == 0)glutAddMenuEntry(_("Down"), DOWNwallmenu);
+
+    CREATEMENU(showpatchmenu,ShowBoundaryMenu);
+    if(npatchloaded>0){
+      char menulabel[1024];
+      patchdata *patchi=NULL, *patchim1=NULL;
+
+      for(ii = 0;ii<npatchinfo;ii++){
+
+        i = patchorderindex[ii];
+        patchi = patchinfo+i;
+        if(patchi->loaded==0)continue;
+        if(patchi->filetype_label!=NULL&&strcmp(patchi->filetype_label, "INCLUDE_GEOM")==0)continue;
+        if(ii>0){
+          if(patchim1!=NULL){
+            if(strcmp(patchi->label.longlabel,patchim1->label.longlabel)==0){
+              patchim1 = patchi;
+              continue;
+            }
+          }
+        }
+        patchim1 = patchi;
+        strcpy(menulabel,"");
+        if(patchi->display==1){
+          strcat(menulabel,"*");
+        }
+        strcat(menulabel,patchi->label.longlabel);
+        if(patchi->structured == NO){
+          if(patchi->filetype_label==NULL||strcmp(patchi->filetype_label, "INCLUDE_GEOM")!=0){
+            glutAddMenuEntry(menulabel, 1000+i);
+          }
+        }
+        else{
+          glutAddMenuEntry(menulabel, SHOWALL_BOUNDARY);
+        }
+      }
+      if(npatchloaded>1)GLUTADDSUBMENU(_("Mesh"), showpatchsinglemenu);
+    }
     npatchloaded=0;
     {
       int local_do_threshold=0;
-      char menulabel[1024];
       int ii;
 
+
+      for(i = 0;i<npatchinfo;i++){
+        patchdata *patchi;
+
+        patchi = patchinfo+i;
+        if(patchi->loaded==0)continue;
+        if(patchi->filetype_label!=NULL&&strcmp(patchi->filetype_label, "INCLUDE_GEOM")==0)continue;
+        npatchloaded++;
+      }
       for(ii=0;ii<npatchinfo;ii++){
         patchdata *patchi;
 
         i = patchorderindex[ii];
         patchi = patchinfo+i;
         if(patchi->loaded==0)continue;
-        npatchloaded++;
-        if(patchi->slice == 1)npatchslice++;
-        if(patchi->display==1&&patchi->type==ipatchtype){
-          STRCPY(menulabel,"*");
-          STRCAT(menulabel,patchi->menulabel);
-        }
-        else{
-          STRCPY(menulabel,patchi->menulabel);
-        }
-        glutAddMenuEntry(menulabel,1000+i);
         if(activate_threshold==1){
           if(
             strncmp(patchi->label.shortlabel,"TEMP",4) == 0||
@@ -5350,185 +6442,107 @@ updatemenu=0;
           }
         }
       }
-      if(npatchslice>0){
-        glutAddMenuEntry("Geometry slice data", DUMMYwallmenu);
-        if(show_patch_solid==1){
-          glutAddMenuEntry("  *solid", SOLIDpatchmenu);
-        }
-        else{
-          glutAddMenuEntry("  solid", SOLIDpatchmenu);
-        }
-        if(show_patch_outline==1){
-          glutAddMenuEntry("  *outline", OUTLINEpatchmenu);
-        }
-        else{
-          glutAddMenuEntry("  outline", OUTLINEpatchmenu);
-        }
-        if(show_patch_verts==1){
-          glutAddMenuEntry("  *points", POINTSpatchmenu);
-        }
-        else{
-          glutAddMenuEntry("  points", POINTSpatchmenu);
-        }
-        glutAddMenuEntry("-", DUMMYwallmenu);
-        if(show_patch_insolid==1){
-          glutAddMenuEntry("  *in solid", INSOLIDpatchmenu);
-        }
-        else{
-          glutAddMenuEntry("  in solid", INSOLIDpatchmenu);
-        }
-      }
-      if(show_patch_ingas==1){
-        glutAddMenuEntry("  *in gas", INGASpatchmenu);
-      }
-      else{
-        glutAddMenuEntry("  in gas", INGASpatchmenu);
-      }
-      if(show_patch_incutcell == 1){
-        glutAddMenuEntry("  *in cutcell", INCUTCELLpatchmenu);
-      }
-      else{
-        glutAddMenuEntry("  in cutcell", INCUTCELLpatchmenu);
-      }
-      {
-        int hide_edges=1;
-
-        if(show_patch_outline==1&&show_patch_cutcell_polygon==1){
-          glutAddMenuEntry("      *show polygon edges", SHOWCUTCELLPOLYGONSpatchmenu);
-          hide_edges = 0;
-        }
-        else{
-          glutAddMenuEntry("      show polygon edges", SHOWCUTCELLPOLYGONSpatchmenu);
-        }
-        if(show_patch_outline==1&&show_patch_cutcell_polygon == 0){
-          glutAddMenuEntry("      *show triangle edges", SHOWCUTCELLTRIANGLESpatchmenu);
-          hide_edges = 0;
-        }
-        else{
-          glutAddMenuEntry("      show triangle edges", SHOWCUTCELLTRIANGLESpatchmenu);
-        }
-        if(hide_edges==1){
-          glutAddMenuEntry("      *hide edges", HIDECUTCELLTRIANGLESpatchmenu);
-        }
-        else{
-          glutAddMenuEntry("      hide edges", HIDECUTCELLTRIANGLESpatchmenu);
-        }
-      }
       if(activate_threshold == 1 && local_do_threshold == 1){
         glutAddMenuEntry("-",DUMMYwallmenu);
         if(vis_threshold==1)glutAddMenuEntry("*char",SHOW_CHAR);
         if(vis_threshold==0)glutAddMenuEntry("char",SHOW_CHAR);
       }
-
     }
-    if(npatchloaded>0){
-      glutAddMenuEntry("-",DUMMYwallmenu);
-    }
-    if(npatchloaded>1){
-      glutAddMenuEntry(_("Show all boundary files"),SHOWALL_BOUNDARY);
-      glutAddMenuEntry(_("Hide all boundary files"),HIDEALL_BOUNDARY);
-      glutAddMenuEntry("-",DUMMYwallmenu);
-    }
-    if(showexterior==1){
-      glutAddMenuEntry(_("*Exterior"),EXTERIORwallmenu);
-    }
-    if(showexterior==0){
-      glutAddMenuEntry(_("Exterior"),EXTERIORwallmenu);
-    }
-    if(visPatchType[INTERIORwall]==1){
-      glutAddMenuEntry(_("*Interior"),INTERIORwallmenu);
-    }
-    if(visPatchType[INTERIORwall]==0){
-      glutAddMenuEntry(_("Interior"),INTERIORwallmenu);
-    }
-    if(IsPatchType(FRONTwall)==1&&visPatchType[FRONTwall]==1){
-      glutAddMenuEntry(_("*Front"),FRONTwallmenu);
-    }
-    if(IsPatchType(FRONTwall)==1&&visPatchType[FRONTwall]==0){
-      glutAddMenuEntry(_("Front"),FRONTwallmenu);
-    }
-    if(IsPatchType(BACKwall)==1&& visPatchType[BACKwall]==1){
-      glutAddMenuEntry(_("*Back"),BACKwallmenu);
-    }
-    if(IsPatchType(BACKwall)==1&& visPatchType[BACKwall]==0){
-      glutAddMenuEntry(_("Back"),BACKwallmenu);
-    }
-    if(IsPatchType(LEFTwall)==1&& visPatchType[LEFTwall]==1){
-      glutAddMenuEntry(_("*Left"),LEFTwallmenu);
-    }
-    if(IsPatchType(LEFTwall)==1&& visPatchType[LEFTwall]==0){
-      glutAddMenuEntry(_("Left"),LEFTwallmenu);
-    }
-    if(IsPatchType(RIGHTwall)==1&&visPatchType[RIGHTwall]==1){
-      glutAddMenuEntry(_("*Right"),RIGHTwallmenu);
-    }
-    if(IsPatchType(RIGHTwall)==1&&visPatchType[RIGHTwall]==0){
-      glutAddMenuEntry(_("Right"),RIGHTwallmenu);
-    }
-    if(IsPatchType(UPwall)==1&&   visPatchType[UPwall]==1){
-      glutAddMenuEntry(_("*Up"),UPwallmenu);
-    }
-    if(IsPatchType(UPwall)==1&&   visPatchType[UPwall]==0){
-      glutAddMenuEntry(_("Up"),UPwallmenu);
-    }
-    if(IsPatchType(DOWNwall)==1&& visPatchType[DOWNwall]==1){
-      glutAddMenuEntry(_("*Down"),DOWNwallmenu);
-    }
-    if(IsPatchType(DOWNwall)==1&& visPatchType[DOWNwall]==0){
-      glutAddMenuEntry(_("Down"),DOWNwallmenu);
-    }
+    GLUTADDSUBMENU(_("Exterior"), showpatchextmenu);
+    if(vis_boundary_type[INTERIORwall]==1)glutAddMenuEntry(_("*Interior"),INTERIORwallmenu);
+    if(vis_boundary_type[INTERIORwall]==0)glutAddMenuEntry(_("Interior"),INTERIORwallmenu);
   }
 
 /* --------------------------------surface menu -------------------------- */
 
   CREATEMENU(immersedsurfacemenu,ImmersedMenu);
-  if(show_faces_solid==1&&show_faces_outline==1){
-    glutAddMenuEntry(_("*Solid and outline"),GEOMETRY_SOLIDOUTLINE);
+  glutAddMenuEntry(_("How"),GEOMETRY_DUMMY);
+  if(show_faces_shaded==1&&show_faces_outline==1){
+    glutAddMenuEntry(_("   *Solid and outline"),GEOMETRY_SOLIDOUTLINE);
   }
   else{
-    glutAddMenuEntry(_("Solid and outline"),GEOMETRY_SOLIDOUTLINE);
+    glutAddMenuEntry(_("   Solid and outline"),GEOMETRY_SOLIDOUTLINE);
   }
-  if(show_faces_solid==1&&show_faces_outline==0){
-    glutAddMenuEntry(_("*Solid only"),GEOMETRY_SOLID);
-  }
-  else{
-    glutAddMenuEntry(_("Solid only"),GEOMETRY_SOLID);
-  }
-  if(show_faces_outline==1&&show_faces_solid==0){
-    glutAddMenuEntry(_("*Outline only"),GEOMETRY_OUTLINE);
+  if(show_faces_shaded==1&&show_faces_outline==0){
+    glutAddMenuEntry(_("   *Solid only"),GEOMETRY_SOLID);
   }
   else{
-    glutAddMenuEntry(_("Outline only"),GEOMETRY_OUTLINE);
+    glutAddMenuEntry(_("   Solid only"),GEOMETRY_SOLID);
   }
-  if(show_faces_solid == 0 && show_faces_outline == 0){
-    glutAddMenuEntry(_("*Hide"),GEOMETRY_HIDE);
+  if(show_faces_outline==1&&show_faces_shaded==0){
+    glutAddMenuEntry(_("   *Outline only"),GEOMETRY_OUTLINE);
   }
   else{
-    glutAddMenuEntry(_("Hide"),GEOMETRY_HIDE);
+    glutAddMenuEntry(_("   Outline only"),GEOMETRY_OUTLINE);
+  }
+  if(show_faces_shaded == 0 && show_faces_outline == 0){
+    glutAddMenuEntry(_("   *Hide"),GEOMETRY_HIDE);
+  }
+  else{
+    glutAddMenuEntry(_("   Hide"),GEOMETRY_HIDE);
+  }
+  glutAddMenuEntry(_("Where"),GEOMETRY_DUMMY);
+  if(show_faces_interior == 1){
+    glutAddMenuEntry(_("   *Interior"), GEOMETRY_FACES_INTERIOR);
+  }
+  else {
+    glutAddMenuEntry(_("   Interior"), GEOMETRY_FACES_INTERIOR);
+  }
+  if(show_faces_exterior == 1){
+    glutAddMenuEntry(_("   *Exterior"), GEOMETRY_FACES_EXTERIOR);
+  }
+  else {
+    glutAddMenuEntry(_("   Exterior"), GEOMETRY_FACES_EXTERIOR);
+  }
+  if(showgeom_inside_domain == 1){
+    glutAddMenuEntry(_("   *Inside domain"), GEOMETRY_INSIDE_DOMAIN);
+  }
+  else {
+    glutAddMenuEntry(_("   Inside domain"), GEOMETRY_INSIDE_DOMAIN);
+  }
+  if(showgeom_outside_domain == 1){
+    glutAddMenuEntry(_("   *Outside domain"), GEOMETRY_OUTSIDE_DOMAIN);
+  }
+  else {
+    glutAddMenuEntry(_("   Outside domain"), GEOMETRY_OUTSIDE_DOMAIN);
   }
 
 /* --------------------------------interior geometry menu -------------------------- */
 
   CREATEMENU(immersedinteriormenu,ImmersedMenu);
+  glutAddMenuEntry(_("How"),GEOMETRY_DUMMY);
   if(have_volume==1){
-    if(show_volumes_solid==1)glutAddMenuEntry(_("*Solid"),GEOMETRY_INTERIOR_SOLID);
-    if(show_volumes_solid==0)glutAddMenuEntry(_("Solid"),GEOMETRY_INTERIOR_SOLID);
-    if(show_volumes_outline==1)glutAddMenuEntry(_("*Outline"),GEOMETRY_INTERIOR_OUTLINE);
-    if(show_volumes_outline==0)glutAddMenuEntry(_("Outline"),GEOMETRY_INTERIOR_OUTLINE);
+    if(show_volumes_solid==1)glutAddMenuEntry(_("  *Solid"),GEOMETRY_INTERIOR_SOLID);
+    if(show_volumes_solid==0)glutAddMenuEntry(_("  Solid"),GEOMETRY_INTERIOR_SOLID);
+    if(show_volumes_outline==1)glutAddMenuEntry(_("  *Outline"),GEOMETRY_INTERIOR_OUTLINE);
+    if(show_volumes_outline==0)glutAddMenuEntry(_("  Outline"),GEOMETRY_INTERIOR_OUTLINE);
     if(show_volumes_outline == 0 && show_volumes_solid == 0){
-      glutAddMenuEntry(_("*Hide"),GEOMETRY_TETRA_HIDE);
+      glutAddMenuEntry(_("  *Hide"),GEOMETRY_TETRA_HIDE);
     }
     else{
-      glutAddMenuEntry(_("Hide"),GEOMETRY_TETRA_HIDE);
+      glutAddMenuEntry(_("  Hide"),GEOMETRY_TETRA_HIDE);
     }
+  }
+  glutAddMenuEntry(_("Where"), GEOMETRY_DUMMY);
+  if(show_volumes_interior == 1){
+    glutAddMenuEntry(_("   *Interior"), GEOMETRY_VOLUMES_INTERIOR);
+  }
+  else {
+    glutAddMenuEntry(_("   Interior"), GEOMETRY_VOLUMES_INTERIOR);
+  }
+  if(show_volumes_exterior == 1){
+    glutAddMenuEntry(_("   *Exterior"), GEOMETRY_VOLUMES_EXTERIOR);
+  }
+  else {
+    glutAddMenuEntry(_("   Exterior"), GEOMETRY_VOLUMES_EXTERIOR);
   }
 
 /* --------------------------------surface geometry menu -------------------------- */
 
   CREATEMENU(immersedmenu,ImmersedMenu);
-  glutAddSubMenu(_("Faces"),immersedsurfacemenu);
+  GLUTADDSUBMENU(_("Faces"),immersedsurfacemenu);
   if(have_volume==1){
-    glutAddSubMenu(_("Volumes"),immersedinteriormenu);
+    GLUTADDSUBMENU(_("Volumes"),immersedinteriormenu);
   }
   if(sort_geometry==1){
     glutAddMenuEntry(_("*Sort faces"), GEOMETRY_SORTFACES);
@@ -5562,7 +6576,7 @@ updatemenu=0;
   else{
     glutAddMenuEntry(_("Hilight skinny triangles"), GEOMETRY_HILIGHTSKINNY);
   }
-  if(show_faces_solid == 0 && show_faces_outline == 0 && show_volumes_solid == 0){
+  if(show_faces_shaded == 0 && show_faces_outline == 0 && show_volumes_solid == 0){
     glutAddMenuEntry(_("*Hide all"), GEOMETRY_HIDEALL);
   }
   else{
@@ -5594,16 +6608,16 @@ updatemenu=0;
     glutAddMenuEntry(_("   Solid"),visBLOCKNormal);
   }
   if(outline_state==OUTLINE_ONLY){
-    glutAddMenuEntry(_("   *Outline Only"),visBLOCKOnlyOutline);
+    glutAddMenuEntry(_("   *Outline only"),visBLOCKOnlyOutline);
   }
   else{
-    glutAddMenuEntry(_("   Outline Only"),visBLOCKOnlyOutline);
+    glutAddMenuEntry(_("   Outline only"),visBLOCKOnlyOutline);
   }
   if(outline_state==OUTLINE_ADDED){
-    glutAddMenuEntry(_("   *Outline Added"),visBLOCKAddOutline);
+    glutAddMenuEntry(_("   *Outline added"),visBLOCKAddOutline);
   }
   else{
-    glutAddMenuEntry(_("   Outline Added"),visBLOCKAddOutline);
+    glutAddMenuEntry(_("   Outline added"),visBLOCKAddOutline);
   }
   if(ncadgeom>0){
     if(viscadopaque==1){
@@ -5812,9 +6826,9 @@ updatemenu=0;
     if(p3dsurfacetype != SURFACE_POINTS)glutAddMenuEntry(_("Points"), SURFACE_POINTS);
 
     CREATEMENU(isosurfacemenu,IsoSurfaceMenu);
-    glutAddSubMenu(_("Solution variable"),isovariablemenu);
-    glutAddSubMenu(_("Solution value"),levelmenu);
-    glutAddSubMenu(_("Surface type"),isosurfacetypemenu);
+    GLUTADDSUBMENU(_("Solution variable"),isovariablemenu);
+    GLUTADDSUBMENU(_("Solution value"),levelmenu);
+    GLUTADDSUBMENU(_("Surface type"),isosurfacetypemenu);
     glutAddMenuEntry(_("Hide"),1);
   }
 
@@ -5840,7 +6854,7 @@ updatemenu=0;
 
     CREATEMENU(textureshowmenu,TextureShowMenu);
     ntextures_used=0;
-    for(i=0;i<ntextures;i++){
+    for(i=0;i<ntextureinfo;i++){
       texturedata *texti;
       char menulabel[1024];
 
@@ -5867,14 +6881,14 @@ updatemenu=0;
 /* --------------------------------Plot3d Show menu -------------------------- */
   if(nplot3dinfo>0){
     CREATEMENU(staticslicemenu,Plot3DShowMenu);
-    glutAddSubMenu(_("Solution variable"),staticvariablemenu);
+    GLUTADDSUBMENU(_("Solution variable"),staticvariablemenu);
     if(visz_all==1)glutAddMenuEntry(_("*xy plane"), MENU_PLOT3D_Z);
     if(visz_all==0)glutAddMenuEntry(_("xy plane"), MENU_PLOT3D_Z);
     if(visy_all==1)glutAddMenuEntry(_("*xz plane"), MENU_PLOT3D_Y);
     if(visy_all==0)glutAddMenuEntry(_("xz plane"), MENU_PLOT3D_Y);
     if(visx_all==1)glutAddMenuEntry(_("*yz plane"), MENU_PLOT3D_X);
     if(visx_all==0)glutAddMenuEntry(_("yz plane"), MENU_PLOT3D_X);
-    if(vectorspresent==1)glutAddSubMenu(_("Flow vectors"),vectorskipmenu);
+    if(vectorspresent==1)GLUTADDSUBMENU(_("Flow vectors"),vectorskipmenu);
     if(contour_type==SHADED_CONTOURS){
       glutAddMenuEntry(_("*Continuous contours"), MENU_PLOT3D_CONT);
     }
@@ -5884,7 +6898,7 @@ updatemenu=0;
     glutAddMenuEntry(_("Show all planes"), MENU_PLOT3D_SHOWALL);
     glutAddMenuEntry(_("Hide all planes"), MENU_PLOT3D_HIDEALL);
 
-    CREATEMENU(plot3dshowmenu,Plot3DShowMenu);
+    CREATEMENU(plot3dshowsinglemeshmenu,Plot3DShowMenu);
     if(nplot3dloaded>0){
       int ii;
 
@@ -5894,14 +6908,6 @@ updatemenu=0;
 
         i=plot3dorderindex[ii];
         plot3di = plot3dinfo + i;
-        if(ii==0){
-          glutAddMenuEntry(plot3di->longlabel, MENU_PLOT3D_DUMMY);
-        }
-        else{
-          if(strcmp(plot3di->longlabel, plot3dinfo[plot3dorderindex[ii - 1]].longlabel) != 0){
-            glutAddMenuEntry(plot3di->longlabel, MENU_PLOT3D_DUMMY);
-          }
-        }
         if(plot3di->loaded==0)continue;
         if(plotstate==STATIC_PLOTS&&plot3di->display==1){
           STRCPY(menulabel,"*");
@@ -5912,18 +6918,32 @@ updatemenu=0;
         }
         glutAddMenuEntry(menulabel,1000+i);
       }
-      if(nplot3dloaded>1){
-        glutAddMenuEntry("-",MENU_PLOT3D_DUMMY);
-        glutAddMenuEntry(_("Show all PLOT3D files"),SHOWALL_PLOT3D);
-        glutAddMenuEntry(_("Hide all PLOT3D files"),HIDEALL_PLOT3D);
-      }
-      glutAddMenuEntry("-",MENU_PLOT3D_DUMMY);
-    }
-    glutAddSubMenu(_("2D contours"),staticslicemenu);
-    if(cache_qdata==1){
-      glutAddSubMenu(_("3D contours"),isosurfacemenu);
     }
 
+    CREATEMENU(plot3dshowmenu,Plot3DShowMenu);
+    if(nplot3dloaded>0){
+      int ii;
+      plot3ddata *plot3di;
+      char menulabel[1024];
+
+      for(ii = 0;ii<nplot3dinfo;ii++){
+        i = plot3dorderindex[ii];
+        plot3di = plot3dinfo+i;
+        if(plot3di->loaded==0)continue;
+        strcpy(menulabel, "");
+        if(show_plot3dfiles==1)strcat(menulabel, "*");
+        strcat(menulabel, plot3di->timelabel);
+        strcat(menulabel, ", ");
+        strcat(menulabel, plot3di->longlabel);
+        glutAddMenuEntry(menulabel, TOGGLESHOW_PLOT3D);
+        break;
+      }
+    }
+    GLUTADDSUBMENU(_("2D contours"),staticslicemenu);
+    if(cache_qdata==1){
+      GLUTADDSUBMENU(_("3D contours"),isosurfacemenu);
+    }
+    if(nplot3dloaded>1)GLUTADDSUBMENU(_("Mesh"),plot3dshowsinglemeshmenu);
   }
 
 /* --------------------------------grid slice menu -------------------------- */
@@ -5984,8 +7004,8 @@ updatemenu=0;
     glutAddMenuEntry(_("*Hide"), MENU_VENT_CIRCLEHIDE);
   }
   glutAddMenuEntry("-",MENU_DUMMY2);
-  if(circle_outline == 1)glutAddMenuEntry("*Outline", MENU_VENT_CIRCLEOUTLINE);
-  if(circle_outline == 0)glutAddMenuEntry("Outline", MENU_VENT_CIRCLEOUTLINE);
+  if(circle_outline == 1)glutAddMenuEntry(_("*Outline"), MENU_VENT_CIRCLEOUTLINE);
+  if(circle_outline == 0)glutAddMenuEntry(_("Outline"), MENU_VENT_CIRCLEOUTLINE);
 
 /* --------------------------------vent menu -------------------------- */
 
@@ -6000,8 +7020,8 @@ updatemenu=0;
       if(visDummyVents == 0)glutAddMenuEntry(_("Exterior"), MENU_VENT_EXTERIOR);
     }
     if(ncvents>0){
-      if(visCircularVents!=VENT_HIDE)glutAddSubMenu(_("*Circular"),circularventmenu);
-      if(visCircularVents==VENT_HIDE)glutAddSubMenu(_("Circular"),circularventmenu);
+      if(visCircularVents!=VENT_HIDE)GLUTADDSUBMENU(_("*Circular"),circularventmenu);
+      if(visCircularVents==VENT_HIDE)GLUTADDSUBMENU(_("Circular"),circularventmenu);
     }
     if(GetNTotalVents()>nopenvents+ndummyvents){
       if(visOtherVents == 1)glutAddMenuEntry(_("*Other"), MENU_VENT_OTHER);
@@ -6041,12 +7061,6 @@ updatemenu=0;
   CREATEMENU(terrain_showmenu,GeometryMenu);
   if(visTerrainType==TERRAIN_3D)glutAddMenuEntry(_("*3D surface"),17+TERRAIN_3D);
   if(visTerrainType!=TERRAIN_3D)glutAddMenuEntry(_("3D surface"),17+TERRAIN_3D);
-#ifdef pp_SHOWTERRAIN
-  if(visTerrainType==TERRAIN_2D_STEPPED)glutAddMenuEntry(_("*2D stepped"),17+TERRAIN_2D_STEPPED);
-  if(visTerrainType!=TERRAIN_2D_STEPPED)glutAddMenuEntry(_("2D stepped"),17+TERRAIN_2D_STEPPED);
-  if(visTerrainType==TERRAIN_2D_LINE)glutAddMenuEntry(_("*2D lines"),17+TERRAIN_2D_LINE);
-  if(visTerrainType!=TERRAIN_2D_LINE)glutAddMenuEntry(_("2D lines"),17+TERRAIN_2D_LINE);
-#endif
   if(terrain_texture!=NULL&&terrain_texture->loaded==1){
     if(visTerrainType==TERRAIN_3D_MAP)glutAddMenuEntry(_("*Image"),17+TERRAIN_3D_MAP);
     if(visTerrainType!=TERRAIN_3D_MAP)glutAddMenuEntry(_("Image"),17+TERRAIN_3D_MAP);
@@ -6090,7 +7104,7 @@ updatemenu=0;
 
         propi = propinfo + i;
         if(propi->nsmokeview_ids>1){
-          glutAddSubMenu(propi->label,propi->menu_id);
+          GLUTADDSUBMENU(propi->label,propi->menu_id);
         }
       }
     }
@@ -6141,8 +7155,8 @@ updatemenu=0;
     }
     if(have_missing_objects == 1&&isZoneFireModel==0){
       glutAddMenuEntry("-", MENU_DUMMY);
-      if(show_missing_objects==1)glutAddMenuEntry("*undefined",OBJECT_MISSING);
-      if(show_missing_objects == 0)glutAddMenuEntry("undefined",OBJECT_MISSING);
+      if(show_missing_objects==1)glutAddMenuEntry(_("*undefined"),OBJECT_MISSING);
+      if(show_missing_objects == 0)glutAddMenuEntry(_("undefined"),OBJECT_MISSING);
     }
     glutAddMenuEntry("-",MENU_DUMMY);
     if(ndeviceinfo>0){
@@ -6172,22 +7186,22 @@ updatemenu=0;
       }
     }
     glutAddMenuEntry("-",MENU_DUMMY);
-    glutAddSubMenu(_("Segments"),spheresegmentmenu);
+    GLUTADDSUBMENU(_("Segments"),spheresegmentmenu);
 
   }
 
 /* --------------------------------geometry menu -------------------------- */
 
   CREATEMENU(geometrymenu,GeometryMenu);
-  if(ntotal_blockages>0)glutAddSubMenu(_("Obstacles"),blockagemenu);
-  if(ngeominfo>0)glutAddSubMenu(_("Immersed"),immersedmenu);
+  if(ntotal_blockages>0)GLUTADDSUBMENU(_("Obstacles"),blockagemenu);
+  if(ngeominfo>0)GLUTADDSUBMENU(_("Immersed"),immersedmenu);
   if(GetNumActiveDevices()>0||ncvents>0){
-    glutAddSubMenu(_("Objects"),showobjectsmenu);
+    GLUTADDSUBMENU(_("Objects"),showobjectsmenu);
   }
-  if(nterraininfo>0){
-    glutAddSubMenu(_("Terrain"),terrain_showmenu);
+  if(nterraininfo>0&&ngeominfo==0){
+    GLUTADDSUBMENU(_("Terrain"),terrain_showmenu);
   }
-  if(GetNTotalVents()>0)glutAddSubMenu(_("Surfaces"), ventmenu);
+  if(GetNTotalVents()>0)GLUTADDSUBMENU(_("Surfaces"), ventmenu);
   if(nrooms > 0){
     if(visCompartments == 1){
       glutAddMenuEntry(_("*Compartments"), GEOM_Compartments);
@@ -6204,9 +7218,7 @@ updatemenu=0;
       glutAddMenuEntry(_("Vents"), GEOM_Vents);
     }
   }
-  if(ntotal_blockages>0 || isZoneFireModel == 1){
-    glutAddSubMenu(_("Grid"),gridslicemenu);
-  }
+  GLUTADDSUBMENU(_("Grid"),gridslicemenu);
   if(isZoneFireModel==0){
     if(visFrame==1)glutAddMenuEntry(_("*Outline"), GEOM_Outline);
     if(visFrame==0)glutAddMenuEntry(_("Outline"), GEOM_Outline);
@@ -6221,15 +7233,32 @@ updatemenu=0;
   glutAddMenuEntry(_("Show all"), GEOM_ShowAll);
   glutAddMenuEntry(_("Hide all"), GEOM_HideAll);
 
+  CREATEMENU(titlemenu, TitleMenu);
+  if(vis_title_smv_version == 1)glutAddMenuEntry(_("*Smokeview version, build data"), MENU_TITLE_title_smv_version);
+  if(vis_title_smv_version == 0)glutAddMenuEntry(_("Smokeview version, build date"), MENU_TITLE_title_smv_version);
+  if(vis_title_gversion== 1)glutAddMenuEntry(_("*FDS, Smokeview version"), MENU_TITLE_gversion);
+  if(vis_title_gversion== 0)glutAddMenuEntry(_("FDS, Smokeview version"), MENU_TITLE_gversion);
+  if(fds_title!=NULL){
+    if(vis_title_fds == 1)glutAddMenuEntry(_("*Input file title"), MENU_TITLE_title_fds);
+    if(vis_title_fds == 0)glutAddMenuEntry(_("Input file title"), MENU_TITLE_title_fds);
+  }
+  if(vis_title_CHID == 1)glutAddMenuEntry(_("*CHID"), MENU_TITLE_chid);
+  if(vis_title_CHID == 0)glutAddMenuEntry(_("CHID"), MENU_TITLE_chid);
+  glutAddMenuEntry("-", MENU_DUMMY);
+  glutAddMenuEntry(_("Show All"), MENU_TITLE_show_all);
+  glutAddMenuEntry(_("Hide All"), MENU_TITLE_hide_all);
+
 /* --------------------------------label menu -------------------------- */
 
   CREATEMENU(labelmenu, LabelMenu);
-  if(visColorbar==1)glutAddMenuEntry(_("*Colorbar"),MENU_LABEL_colorbar);
-  if(visColorbar==0)glutAddMenuEntry(_("Colorbar"),MENU_LABEL_colorbar);
+  if(visColorbarVertical==1)glutAddMenuEntry(_("*Colorbar(vertical)"),MENU_LABEL_colorbar_vertical);
+  if(visColorbarVertical==0)glutAddMenuEntry(_("Colorbar(vertical)"), MENU_LABEL_colorbar_vertical);
+  if(visColorbarHorizontal == 1)glutAddMenuEntry(_("*Colorbar(horizontal)"), MENU_LABEL_colorbar_horizontal);
+  if(visColorbarHorizontal == 0)glutAddMenuEntry(_("Colorbar(horizontal)"), MENU_LABEL_colorbar_horizontal);
   if(visTimebar==1)glutAddMenuEntry(_("*Time bar"),MENU_LABEL_timebar);
   if(visTimebar==0)glutAddMenuEntry(_("Time bar"),MENU_LABEL_timebar);
-  if(visTitle == 1)glutAddMenuEntry(_("*Title"), MENU_LABEL_title);
-  if(visTitle == 0)glutAddMenuEntry(_("Title"), MENU_LABEL_title);
+  GLUTADDSUBMENU(_("Titles"),titlemenu);
+
   glutAddMenuEntry("-", MENU_DUMMY);
 
   if(visaxislabels == 1)glutAddMenuEntry(_("*Axis"), MENU_LABEL_axis);
@@ -6248,10 +7277,20 @@ updatemenu=0;
   if(visFramerate == 0)glutAddMenuEntry(_("Frame rate"), MENU_LABEL_framerate);
   if(visgridloc == 1)glutAddMenuEntry(_("*Grid locations"), MENU_LABEL_grid);
   if(visgridloc == 0)glutAddMenuEntry(_("Grid locations"), MENU_LABEL_grid);
-  if(show_hrrcutoff_active == 1){
-    if(show_hrrcutoff == 1)glutAddMenuEntry(_("*HRRPUV cutoff"), MENU_LABEL_hrrcutoff);
-    if(show_hrrcutoff == 0)glutAddMenuEntry(_("HRRPUV cutoff"), MENU_LABEL_hrrcutoff);
+
+  if(show_hrrcutoff_active == 1&&show_tempcutoff_active==1){
+    if(show_firecutoff == 1)glutAddMenuEntry(_("*Fire cutoff"), MENU_LABEL_firecutoff);
+    if(show_firecutoff == 0)glutAddMenuEntry(_("Fire cutoff"), MENU_LABEL_firecutoff);
   }
+  else if(show_hrrcutoff_active == 1&&show_tempcutoff_active==0){
+    if(show_firecutoff == 1)glutAddMenuEntry(_("*HRRPUV cutoff"), MENU_LABEL_firecutoff);
+    if(show_firecutoff == 0)glutAddMenuEntry(_("HRRPUV cutoff"), MENU_LABEL_firecutoff);
+  }
+  else if(show_hrrcutoff_active == 0&&show_tempcutoff_active==1){
+    if(show_firecutoff == 1)glutAddMenuEntry(_("*Temperature cutoff"), MENU_LABEL_firecutoff);
+    if(show_firecutoff == 0)glutAddMenuEntry(_("Temperature cutoff"), MENU_LABEL_firecutoff);
+  }
+
   if(hrrinfo != NULL){
     if(visHRRlabel == 1)glutAddMenuEntry(_("*HRR"), MENU_LABEL_hrr);
     if(visHRRlabel == 0)glutAddMenuEntry(_("HRR"), MENU_LABEL_hrr);
@@ -6276,48 +7315,51 @@ updatemenu=0;
   if(visTimelabel == 0)glutAddMenuEntry(_("Time"), MENU_LABEL_timelabel);
   if(visUSERticks == 1)glutAddMenuEntry(_("*User settable ticks"), MENU_LABEL_userticks);
   if(visUSERticks == 0)glutAddMenuEntry(_("User settable ticks"), MENU_LABEL_userticks);
-  if(gversion == 1)glutAddMenuEntry(_("*Version info"), MENU_LABEL_gversion);
-  if(gversion == 0)glutAddMenuEntry(_("Version info"), MENU_LABEL_gversion);
-  if(visCHID == 1)glutAddMenuEntry(_("*CHID"), MENU_LABEL_chid);
-  if(visCHID == 0)glutAddMenuEntry(_("CHID"), MENU_LABEL_chid);
 
   glutAddMenuEntry("-", MENU_DUMMY);
   glutAddMenuEntry(_("Show all"), MENU_LABEL_ShowAll);
   glutAddMenuEntry(_("Hide all"), MENU_LABEL_HideAll);
+  glutAddMenuEntry(_("Settings..."), MENU_LABEL_SETTINGS);
 
 /* --------------------------------rotate type menu -------------------------- */
 
   CREATEMENU(rotatetypemenu,RotateTypeMenu);
-  glutAddMenuEntry("Scene centered:",MENU_DUMMY);
+  glutAddMenuEntry(_("Scene centered:"),MENU_DUMMY);
   switch(rotation_type){
   case EYE_CENTERED:
-    glutAddMenuEntry("  2 axis",ROTATION_2AXIS);
-    glutAddMenuEntry("  Level (1 axis)",ROTATION_1AXIS);
-    glutAddMenuEntry("  3 axis",ROTATION_3AXIS);
-    glutAddMenuEntry("*Eye centered",EYE_CENTERED);
+    glutAddMenuEntry(_("  2 axis"),ROTATION_2AXIS);
+    glutAddMenuEntry(_("  Level (1 axis)"),ROTATION_1AXIS);
+    glutAddMenuEntry(_("  3 axis"),ROTATION_3AXIS);
+    glutAddMenuEntry(_("*Eye centered"),EYE_CENTERED);
     break;
   case ROTATION_2AXIS:
-    glutAddMenuEntry("  *2 axis",ROTATION_2AXIS);
-    glutAddMenuEntry("  Level (1 axis)",ROTATION_1AXIS);
-    glutAddMenuEntry("  3 axis",ROTATION_3AXIS);
-    glutAddMenuEntry("Eye centered",EYE_CENTERED);
+    glutAddMenuEntry(_("  *2 axis"),ROTATION_2AXIS);
+    glutAddMenuEntry(_("  Level (1 axis)"),ROTATION_1AXIS);
+    glutAddMenuEntry(_("  3 axis"),ROTATION_3AXIS);
+    glutAddMenuEntry(_("Eye centered"),EYE_CENTERED);
     break;
   case ROTATION_1AXIS:
-    glutAddMenuEntry("  2 axis",ROTATION_2AXIS);
-    glutAddMenuEntry("  *Level (1 axis)",ROTATION_1AXIS);
-    glutAddMenuEntry("  3 axis",ROTATION_3AXIS);
-    glutAddMenuEntry("Eye centered",EYE_CENTERED);
+    glutAddMenuEntry(_("  2 axis"),ROTATION_2AXIS);
+    glutAddMenuEntry(_("  *Level (1 axis)"),ROTATION_1AXIS);
+    glutAddMenuEntry(_("  3 axis"),ROTATION_3AXIS);
+    glutAddMenuEntry(_("Eye centered"),EYE_CENTERED);
     break;
   case ROTATION_3AXIS:
-    glutAddMenuEntry("  2 axis",ROTATION_2AXIS);
-    glutAddMenuEntry("  Level (1 axis)",ROTATION_1AXIS);
-    glutAddMenuEntry("  *3 axis",ROTATION_3AXIS);
-    glutAddMenuEntry("Eye centered",EYE_CENTERED);
+    glutAddMenuEntry(_("  2 axis"),ROTATION_2AXIS);
+    glutAddMenuEntry(_("  Level (1 axis)"),ROTATION_1AXIS);
+    glutAddMenuEntry(_("  *3 axis"),ROTATION_3AXIS);
+    glutAddMenuEntry(_("Eye centered"),EYE_CENTERED);
     break;
   default:
     ASSERT(FFALSE);
     break;
   }
+  glutAddMenuEntry(_("Direction vectors:"), MENU_DUMMY);
+  if(showgravity_vector==1)glutAddMenuEntry(_("  *show gravity, axis vectors"), MENU_MOTION_SHOW_VECTORS);
+  if(showgravity_vector==0)glutAddMenuEntry(_("  show gravity, axis vectors"), MENU_MOTION_SHOW_VECTORS);
+  glutAddMenuEntry(_("  gravity vector down"), MENU_MOTION_GRAVITY_VECTOR);
+  glutAddMenuEntry(_("  z vector up"), MENU_MOTION_Z_VECTOR);
+  glutAddMenuEntry(_("Settings..."), MENU_MOTION_SETTINGS);
 
 /* --------------------------------zone show menu -------------------------- */
 
@@ -6372,6 +7414,22 @@ updatemenu=0;
     else{
       glutAddMenuEntry(_("   Hide"), MENU_ZONE_LAYERHIDE);
     }
+    if(have_wall_data==1){
+      if(vis_wall_data==1){
+        glutAddMenuEntry(_("*Walls"), MENU_ZONE_WALLS);
+      }
+      else{
+        glutAddMenuEntry(_("Walls"), MENU_ZONE_WALLS);
+      }
+    }
+    if(have_target_data==1){
+      if(vis_target_data==1){
+        glutAddMenuEntry(_("*Target"), MENU_ZONE_TARGETS);
+      }
+      else{
+        glutAddMenuEntry(_("Targets"), MENU_ZONE_TARGETS);
+      }
+    }
     if(nzvents>0){
       if(visVentFlow==1){
         glutAddMenuEntry(_("*Vent flow"), MENU_ZONE_VENTS);
@@ -6380,7 +7438,7 @@ updatemenu=0;
         glutAddMenuEntry(_("Vent flow"), MENU_ZONE_VENTS);
       }
       if(nzhvents>0){
-        if(visVentHFlow==1){
+        if(visVentHFlow == 1){
           glutAddMenuEntry(_("   *Horizontal"), MENU_ZONE_HVENTS);
         }
         else{
@@ -6620,7 +7678,7 @@ updatemenu=0;
             strcpy(menulabel,"  ");
           }
           strcat(menulabel,partclassj->name);
-          glutAddSubMenu(menulabel,particlepropshowsubmenu[ntypes-1]);
+          GLUTADDSUBMENU(menulabel,particlepropshowsubmenu[ntypes-1]);
         }
       }
 
@@ -6630,10 +7688,10 @@ updatemenu=0;
       }
       glutAddMenuEntry("-",MENU_PROP_DUMMY);
       if(streak5show==1){
-        glutAddSubMenu(_("*Streaks"),particlestreakshowmenu);
+        GLUTADDSUBMENU(_("*Streaks"),particlestreakshowmenu);
       }
       else{
-        glutAddSubMenu(_("Streaks"),particlestreakshowmenu);
+        GLUTADDSUBMENU(_("Streaks"),particlestreakshowmenu);
       }
       glutAddMenuEntry("-",MENU_PROP_DUMMY);
       if(show_tracers_always==0)glutAddMenuEntry(_("Show tracers always"),MENU_PROP_TRACERS);
@@ -6685,7 +7743,7 @@ updatemenu=0;
             strcpy(menulabel,"  ");
           }
           strcat(menulabel,partclassj->name);
-          glutAddSubMenu(menulabel,particlepropshowsubmenu[ntypes-1]);
+          GLUTADDSUBMENU(menulabel,particlepropshowsubmenu[ntypes-1]);
         }
         //break;
       }
@@ -6695,10 +7753,10 @@ updatemenu=0;
       }
       glutAddMenuEntry("-",MENU_PROP_DUMMY);
       if(streak5show==1){
-        glutAddSubMenu(_("  *Streaks"),particlestreakshowmenu);
+        GLUTADDSUBMENU(_("  *Streaks"),particlestreakshowmenu);
       }
       else{
-        glutAddSubMenu(_("  Streaks"),particlestreakshowmenu);
+        GLUTADDSUBMENU(_("  Streaks"),particlestreakshowmenu);
       }
     }
   }
@@ -6794,13 +7852,12 @@ updatemenu=0;
 
 /* -------------------------------- colorbarmenu -------------------------- */
 
-  if((nsmoke3dinfo>0&&Read3DSmoke3DFile==1)||nvolrenderinfo>0){
+  if(nsmoke3dloaded>0||nvolrenderinfo>0){
     colorbardata *cbi;
     char ccolorbarmenu[256];
 
     CREATEMENU(smokecolorbarmenu,SmokeColorbarMenu);
 
-    glutAddMenuEntry(_("Smoke map:"),MENU_DUMMY);
     for(i=0;i<ncolorbars;i++){
       cbi = colorbarinfo + i;
 
@@ -6818,10 +7875,11 @@ updatemenu=0;
 
 
   /* --------------------------------smoke3d showmenu -------------------------- */
-  if(nsmoke3dinfo>0&&Read3DSmoke3DFile==1){
+
+  if(nsmoke3dloaded>0){
     {
       if(nsmoke3dloaded>0){
-        CREATEMENU(smoke3dshowmenu,Smoke3DShowMenu);
+        CREATEMENU(smoke3dshowsinglemenu, Smoke3DShowMenu);
         for(i=0;i<nsmoke3dinfo;i++){
           smoke3ddata *smoke3di;
           char menulabel[1024];
@@ -6833,12 +7891,11 @@ updatemenu=0;
           strcat(menulabel,smoke3di->menulabel);
           glutAddMenuEntry(menulabel,i);
         }
-        glutAddSubMenu(_("Smoke colorbar"),smokecolorbarmenu);
-        if(nsmoke3dinfo>1){
-          glutAddMenuEntry("-",MENU_DUMMY);
-          glutAddMenuEntry(_("Show all"),SHOW_ALL);
-          glutAddMenuEntry(_("Hide all"),HIDE_ALL);
-        }
+        CREATEMENU(smoke3dshowmenu, Smoke3DShowMenu);
+        if(show_3dsmokefiles==1)glutAddMenuEntry(_("*Show"), TOGGLE_SMOKE3D);
+        if(show_3dsmokefiles==0)glutAddMenuEntry(_("Show"), TOGGLE_SMOKE3D);
+        GLUTADDSUBMENU(_("Smoke colorbar"),smokecolorbarmenu);
+        GLUTADDSUBMENU(_("Mesh"), smoke3dshowsinglemenu);
       }
     }
   }
@@ -6922,19 +7979,10 @@ updatemenu=0;
       if(iso2!=NULL){
         char menulabel[1024];
 
-        glutAddSubMenu(iso2->surface_label.longlabel, isoshowsubmenu);
-        STRCPY(menulabel, _("Show all"));
-        STRCAT(menulabel," ");
+        STRCPY(menulabel,"");
+        if(show_isofiles==1)STRCAT(menulabel,"*");
         STRCAT(menulabel,iso2->surface_label.longlabel);
-        STRCAT(menulabel," ");
-        STRCAT(menulabel,_("isosurfaces"));
-        glutAddMenuEntry(menulabel,SHOWALL_ISO);
-        STRCPY(menulabel,_("Hide all"));
-        STRCAT(menulabel," ");
-        STRCAT(menulabel,iso2->surface_label.longlabel);
-        STRCAT(menulabel," ");
-        STRCAT(menulabel,_("isosurfaces"));
-        glutAddMenuEntry(menulabel,HIDEALL_ISO);
+        glutAddMenuEntry(menulabel,TOGGLE_ISO);
         glutAddMenuEntry("-", MENU_DUMMY);
       }
       if((visAIso & 1) == 1)glutAddMenuEntry(_("*Solid"), MENU_ISOSHOW_SOLID);
@@ -6950,7 +7998,7 @@ updatemenu=0;
         STRCPY(levellabel,isoinfo[hmesh->isofilenum].surface_label.shortlabel);
         STRCAT(levellabel," ");
         STRCAT(levellabel,_("Levels"));
-        glutAddSubMenu(levellabel,isolevelmenu);
+        GLUTADDSUBMENU(levellabel,isolevelmenu);
       }
       if(niso_compressed==0){
         if(smooth_iso_normal == 1)glutAddMenuEntry(_("*Smooth"), MENU_ISOSHOW_SMOOTH);
@@ -6958,25 +8006,31 @@ updatemenu=0;
       }
       if(show_iso_normal == 1)glutAddMenuEntry(_("*Show normals"), MENU_ISOSHOW_NORMALS);
       if(show_iso_normal == 0)glutAddMenuEntry(_("Show normals"), MENU_ISOSHOW_NORMALS);
+      GLUTADDSUBMENU(_("Mesh"), isoshowsubmenu);
     }
   }
 
 /* -------------------------------- colorbarmenu -------------------------- */
 
   CREATEMENU(colorbarshademenu,ColorbarMenu);
+  if(visColorbarVertical==1)glutAddMenuEntry(_("*Vertical"),COLORBAR_VERTICAL);
+  if(visColorbarVertical==0)glutAddMenuEntry(_("Vertical"),COLORBAR_VERTICAL);
+  if(visColorbarHorizontal==1)glutAddMenuEntry(_("*Horizontal"),COLORBAR_HORIZONTAL);
+  if(visColorbarHorizontal==0)glutAddMenuEntry(_("Horizontal"),COLORBAR_HORIZONTAL);
+  glutAddMenuEntry("-", MENU_DUMMY);
   if(contour_type==SHADED_CONTOURS){
-    glutAddMenuEntry("*Continuous",COLORBAR_CONTINUOUS);
-    glutAddMenuEntry("Stepped",COLORBAR_STEPPED);
-    glutAddMenuEntry("Lines",COLORBAR_LINES);
+    glutAddMenuEntry(_("*Continuous"),COLORBAR_CONTINUOUS);
+    glutAddMenuEntry(_("Stepped"),COLORBAR_STEPPED);
+    glutAddMenuEntry(_("Lines"),COLORBAR_LINES);
   }
   else if(contour_type==STEPPED_CONTOURS){
-    glutAddMenuEntry("Continuous",COLORBAR_CONTINUOUS);
-    glutAddMenuEntry("*Stepped",COLORBAR_STEPPED);
-    glutAddMenuEntry("Lines",COLORBAR_LINES);
+    glutAddMenuEntry(_("Continuous"),COLORBAR_CONTINUOUS);
+    glutAddMenuEntry(_("*Stepped"),COLORBAR_STEPPED);
+    glutAddMenuEntry(_("Lines"),COLORBAR_LINES);
   }else if(contour_type==LINE_CONTOURS){
-    glutAddMenuEntry("Continuous",COLORBAR_CONTINUOUS);
-    glutAddMenuEntry("Stepped",COLORBAR_STEPPED);
-    glutAddMenuEntry("*Lines",COLORBAR_LINES);
+    glutAddMenuEntry(_("Continuous"),COLORBAR_CONTINUOUS);
+    glutAddMenuEntry(_("Stepped"),COLORBAR_STEPPED);
+    glutAddMenuEntry(_("*Lines"),COLORBAR_LINES);
   }
   glutAddMenuEntry("-",MENU_DUMMY);
   if(show_extreme_maxdata == 1){
@@ -6991,11 +8045,17 @@ updatemenu=0;
   else{
     glutAddMenuEntry(_("  Highlight data below specified min"), COLORBAR_HIGHLIGHT_BELOW);
   }
-  if(colorbarflip == 1){
+  if(colorbar_flip == 1){
     glutAddMenuEntry(_("  *Flip"), COLORBAR_FLIP);
   }
   else{
     glutAddMenuEntry(_("  Flip"), COLORBAR_FLIP);
+  }
+  if(colorbar_autoflip == 1){
+    glutAddMenuEntry(_("  *Auto flip"), COLORBAR_AUTOFLIP);
+  }
+  else{
+    glutAddMenuEntry(_("  Auto flip"), COLORBAR_AUTOFLIP);
   }
 
   CREATEMENU(colorbarsmenu,ColorbarMenu);
@@ -7021,27 +8081,29 @@ updatemenu=0;
 /* -------------------------------- colorbarmenu -------------------------- */
 
   CREATEMENU(colorbarmenu,ColorbarMenu);
-  glutAddSubMenu(_("Colorbar"),colorbarsmenu);
-  glutAddSubMenu(_("Colorbar type"), colorbarshademenu);
+  GLUTADDSUBMENU(_("Colorbar"),colorbarsmenu);
+  GLUTADDSUBMENU(_("Colorbar type"), colorbarshademenu);
   if(use_transparency_data==1){
     glutAddMenuEntry(_("  *Transparent (data)"),COLORBAR_TRANSPARENT);
   }
   else{
     glutAddMenuEntry(_("  Transparent (data)"),COLORBAR_TRANSPARENT);
   }
-  if(setbwdata == 1)glutAddMenuEntry("*Black/White (data)", COLORBAR_TOGGLE_BW_DATA);
-  if(setbwdata == 0)glutAddMenuEntry("Black/White  (data)", COLORBAR_TOGGLE_BW_DATA);
-  if(setbw == 1)glutAddMenuEntry("*Black/White (geometry)", COLORBAR_TOGGLE_BW);
-  if(setbw == 0)glutAddMenuEntry("Black/White (geometry)", COLORBAR_TOGGLE_BW);
+  if(setbwdata == 1)glutAddMenuEntry(_("*Black/White (data)"), COLORBAR_TOGGLE_BW_DATA);
+  if(setbwdata == 0)glutAddMenuEntry(_("Black/White (data)"), COLORBAR_TOGGLE_BW_DATA);
+  if(setbw == 1)glutAddMenuEntry(_("*Black/White (geometry)"), COLORBAR_TOGGLE_BW);
+  if(setbw == 0)glutAddMenuEntry(_("Black/White (geometry)"), COLORBAR_TOGGLE_BW);
   glutAddMenuEntry(_("  Reset"), COLORBAR_RESET);
+  if(use_lighting==1)glutAddMenuEntry(_("*Lighting"), USE_LIGHTING);
+  if(use_lighting==0)glutAddMenuEntry(_("Lighting"), USE_LIGHTING);
+  glutAddMenuEntry(_("Settings..."), MENU_COLORBAR_SETTINGS);
 
 /* --------------------------------showVslice menu -------------------------- */
   if(nvsliceloaded==0){
     vd_shown=NULL;
   }
   if(nvsliceinfo>0&&nvsliceloaded>0){
-    CREATEMENU(showvslicemenu,ShowVSliceMenu);
-    nvsliceloaded0=0;
+    CREATEMENU(showsingleslicemenu,ShowVSliceMenu);
     for(i=0;i<nvsliceinfo;i++){
       vslicedata *vd;
       slicedata *sd;
@@ -7050,9 +8112,8 @@ updatemenu=0;
       vd = vsliceinfo + i;
       if(vd->loaded==0)continue;
       sd = sliceinfo + vd->ival;
-      nvsliceloaded0++;
       STRCPY(menulabel,"");
-      if(plotstate==DYNAMIC_PLOTS&&sd->type==islicetype&&vd->display==1){
+      if(plotstate==DYNAMIC_PLOTS&&sd->slicefile_labelindex==slicefile_labelindex&&vd->display==1){
         vd_shown=vd;
         STRCAT(menulabel,"*");
       }
@@ -7063,21 +8124,30 @@ updatemenu=0;
       }
       glutAddMenuEntry(menulabel,i);
     }
-    glutAddMenuEntry("Show vector slice", MENU_DUMMY);
+    CREATEMENU(showvslicemenu,ShowVSliceMenu);
+    if(vd_shown!=NULL&&nvsliceloaded!=0){
+      char menulabel[1024];
+
+      STRCPY(menulabel, "");
+      if(showall_slices==1)STRCAT(menulabel, "*");
+      STRCAT(menulabel, sliceinfo[vd_shown->ival].label.longlabel);
+      glutAddMenuEntry(menulabel,SHOW_ALL);
+    }
+    glutAddMenuEntry(_("  Show in:"), MENU_DUMMY);
     if(show_slice_in_obst==ONLY_IN_GAS){
-      glutAddMenuEntry(_("  *gas"),  MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+      glutAddMenuEntry(_("    *gas"),  MENU_SHOWSLICE_IN_GAS);
+      glutAddMenuEntry(_("    solid"), MENU_SHOWSLICE_IN_SOLID);
+      glutAddMenuEntry(_("    gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
     }
     if(show_slice_in_obst==GAS_AND_SOLID){
-      glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  *gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+      glutAddMenuEntry(_("    gas"), MENU_SHOWSLICE_IN_GAS);
+      glutAddMenuEntry(_("    solid"), MENU_SHOWSLICE_IN_SOLID);
+      glutAddMenuEntry(_("    *gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
     }
     if(show_slice_in_obst==ONLY_IN_SOLID){
-      glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  *solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+      glutAddMenuEntry(_("    gas"), MENU_SHOWSLICE_IN_GAS);
+      glutAddMenuEntry(_("    *solid"), MENU_SHOWSLICE_IN_SOLID);
+      glutAddMenuEntry(_("    gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
     }
     if(show_node_slices_and_vectors == 1)glutAddMenuEntry(_("*Show node centered slices and vectors"), MENU_SHOWSLICE_NODESLICEANDVECTORS);
     if(show_node_slices_and_vectors == 0)glutAddMenuEntry(_("Show node centered slices and vectors"), MENU_SHOWSLICE_NODESLICEANDVECTORS);
@@ -7085,93 +8155,30 @@ updatemenu=0;
     if(show_cell_slices_and_vectors == 0)glutAddMenuEntry(_("Show cell centered slices and vectors"), MENU_SHOWSLICE_CELLSLICEANDVECTORS);
     if(offset_slice == 1)glutAddMenuEntry(_("*Offset vector slice"), MENU_SHOWSLICE_OFFSET);
     if(offset_slice == 0)glutAddMenuEntry(_("Offset vector slice"), MENU_SHOWSLICE_OFFSET);
-    if(vd_shown!=NULL&&nvsliceloaded0!=0){
-      char menulabel[1024];
-
-      glutAddMenuEntry("",MENU_DUMMY);
-      STRCPY(menulabel,_("Show all"));
-      STRCAT(menulabel," ");
-      STRCAT(menulabel,sliceinfo[vd_shown->ival].label.longlabel);
-      STRCAT(menulabel," ");
-      STRCAT(menulabel,_("vector slices"));
-      glutAddMenuEntry(menulabel,SHOW_ALL);
-      STRCPY(menulabel,_("Hide all"));
-      STRCAT(menulabel," ");
-      STRCAT(menulabel,sliceinfo[vd_shown->ival].label.longlabel);
-      STRCAT(menulabel," ");
-      STRCAT(menulabel,_("vector slices"));
-      glutAddMenuEntry(menulabel,HIDE_ALL);
-    }
-  }
-  if(nsliceinfo>0&&nmultisliceinfo<nsliceinfo){
-    CREATEMENU(showmultislicemenu,ShowMultiSliceMenu);
-    for(i=0;i<nmultisliceinfo;i++){
-      slicedata *sd;
-      char menulabel[1024];
-      multislicedata *mslicei;
-
-      mslicei = multisliceinfo + i;
-      if(mslicei->loaded==0)continue;
-      sd = sliceinfo + mslicei->islices[0];
-      STRCPY(menulabel,"");
-      if(plotstate==DYNAMIC_PLOTS&&mslicei->display!=0&&mslicei->type==islicetype){
-        if(mslicei->display==1){
-          STRCAT(menulabel,"*");
-        }
-        else if(mslicei->display==-1){
-          STRCAT(menulabel,"#");
-        }
-      }
-      STRCAT(menulabel,mslicei->menulabel2);
-      if(sd->slicelabel!=NULL){
-        STRCAT(menulabel," - ");
-        STRCAT(menulabel,sd->slicelabel);
-      }
-      glutAddMenuEntry(menulabel,i);
-    }
-    glutAddMenuEntry("Show multislice", MENU_DUMMY);
-    if(show_slice_in_obst==ONLY_IN_GAS){
-      glutAddMenuEntry(_("  *gas"),  MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
-    }
-    if(show_slice_in_obst==GAS_AND_SOLID){
-      glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  *gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
-    }
-    if(show_slice_in_obst==ONLY_IN_SOLID){
-      glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  *solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
-    }
-    if(offset_slice == 1)glutAddMenuEntry(_("*Offset slice"), MENU_SHOWSLICE_OFFSET);
-    if(offset_slice == 0)glutAddMenuEntry(_("Offset slice"), MENU_SHOWSLICE_OFFSET);
-    if(nfedinfo>0){
-      if(show_fed_area == 1)glutAddMenuEntry("*Show FED areas", MENU_SHOWSLICE_FEDAREA);
-      if(show_fed_area == 0)glutAddMenuEntry("Show FED areas", MENU_SHOWSLICE_FEDAREA);
-    }
+    GLUTADDSUBMENU(_("Mesh"), showsingleslicemenu);
   }
 
 /* --------------------------------showslice menu -------------------------- */
   if(nsliceloaded==0){
     sd_shown=NULL;
   }
-  if(nsliceinfo>0&&nsliceloaded>0){
+  if(nsliceloaded>0||patchgeom_slice_showhide==1){
     int ii;
 
     CREATEMENU(showhideslicemenu,ShowHideSliceMenu);
+    // loaded slice entries
     for(ii=0;ii<nslice_loaded;ii++){
       slicedata *sd;
       char menulabel[1024];
+      int doit;
 
       i = slice_loaded_list[ii];
       sd = sliceinfo + i;
-      if(sd_shown==NULL&&sd->type==islicetype){
+      if(sd_shown==NULL&&sd->slicefile_labelindex==slicefile_labelindex){
         sd_shown = sd;
       }
       STRCPY(menulabel,"");
-      if(plotstate==DYNAMIC_PLOTS&&sd->display==1&&sd->type==islicetype){
+      if(plotstate==DYNAMIC_PLOTS&&sd->display==1&&sd->slicefile_labelindex==slicefile_labelindex){
         sd_shown=sd;
         STRCAT(menulabel,"*");
       }
@@ -7180,60 +8187,186 @@ updatemenu=0;
         STRCAT(menulabel," - ");
         STRCAT(menulabel,sd->slicelabel);
       }
-      glutAddMenuEntry(menulabel,i);
-    }
-    glutAddMenuEntry("-",MENU_DUMMY);
-    if(have_terrain_slice() == 1){
-      if(planar_terrain_slice == 1)glutAddMenuEntry(_("*Planar terrain slice"), MENU_SHOWSLICE_TERRAIN);
-      if(planar_terrain_slice == 0)glutAddMenuEntry(_("Planar terrain slice"), MENU_SHOWSLICE_TERRAIN);
-    }
+      doit=1;
+      if(sd->slice_filetype==SLICE_TERRAIN){
+        meshdata *meshslice;
+        terraindata *terri;
 
-    glutAddMenuEntry("Show slice", MENU_DUMMY);
-    if(show_slice_in_obst==ONLY_IN_GAS){
-      glutAddMenuEntry(_("  *gas"),  MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+        meshslice = meshinfo + sd->blocknumber;
+        terri = meshslice->terrain;
+        if(terri==NULL||terri->nvalues==0)doit = 0;
+      }
+      if(doit==1)glutAddMenuEntry(menulabel,i);
     }
-    if(show_slice_in_obst==GAS_AND_SOLID){
-      glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  *gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
-    }
-    if(show_slice_in_obst==ONLY_IN_SOLID){
-      glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  *solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
-    }
-    if(offset_slice == 1)glutAddMenuEntry(_("*Offset slice"), MENU_SHOWSLICE_OFFSET);
-    if(offset_slice == 0)glutAddMenuEntry(_("Offset slice"), MENU_SHOWSLICE_OFFSET);
-    if(show_node_slices_and_vectors == 1)glutAddMenuEntry(_("*Show node centered slices and vectors"), MENU_SHOWSLICE_NODESLICEANDVECTORS);
-    if(show_node_slices_and_vectors == 0)glutAddMenuEntry(_("Show node centered slices and vectors"), MENU_SHOWSLICE_NODESLICEANDVECTORS);
-    if(show_cell_slices_and_vectors == 1)glutAddMenuEntry(_("*Show cell centered slices and vectors"), MENU_SHOWSLICE_CELLSLICEANDVECTORS);
-    if(show_cell_slices_and_vectors == 0)glutAddMenuEntry(_("Show cell centered slices and vectors"), MENU_SHOWSLICE_CELLSLICEANDVECTORS);
-    if(nfedinfo>0){
-      if(show_fed_area == 1)glutAddMenuEntry("*Show FED areas", MENU_SHOWSLICE_FEDAREA);
-      if(show_fed_area == 0)glutAddMenuEntry("Show FED areas", MENU_SHOWSLICE_FEDAREA);
-    }
-    if(nsliceloaded>0&&sd_shown!=NULL){
-      char menulabel[1024];
+    // loaded geometry slice entries
+    for(ii = 0;ii<npatchinfo;ii++){
+      patchdata *patchi;
 
-      glutAddMenuEntry("-",MENU_DUMMY);
-      STRCPY(menulabel,_("Show all"));
-      STRCAT(menulabel," ");
-      STRCAT(menulabel,sd_shown->label.longlabel);
-      STRCAT(menulabel," ");
-      STRCAT(menulabel,_("slices"));
-      glutAddMenuEntry(menulabel,SHOW_ALL);
-      STRCPY(menulabel,_("Hide all"));
-      STRCAT(menulabel," ");
-      STRCAT(menulabel,sd_shown->label.longlabel);
-      STRCAT(menulabel," ");
-      STRCAT(menulabel,_("slices"));
-      glutAddMenuEntry(menulabel,HIDE_ALL);
+      i = patchorderindex[ii];
+      patchi = patchinfo+i;
+      if(patchi->loaded==1&&patchi->filetype_label!=NULL&&strcmp(patchi->filetype_label, "INCLUDE_GEOM")==0){
+        char mlabel[250];
+
+        strcpy(mlabel, "");
+        if(patchi->display == 1)strcat(mlabel, "*");
+        strcat(mlabel, patchi->label.longlabel);
+        glutAddMenuEntry(mlabel,-20-i);
+      }
+    }
+    if(nsliceinfo>0&&nmultisliceinfo+nfedinfo<nsliceinfo){
+    }
+    else{
+      glutAddMenuEntry("-", MENU_DUMMY);
+      if(HaveTerrainSlice()==1){
+        if(planar_terrain_slice==1)glutAddMenuEntry(_("*Planar terrain slice"), MENU_SHOWSLICE_TERRAIN);
+        if(planar_terrain_slice==0)glutAddMenuEntry(_("Planar terrain slice"), MENU_SHOWSLICE_TERRAIN);
+      }
+
+      if(nsliceloaded>0){
+        glutAddMenuEntry(_("Show in:"), MENU_DUMMY);
+        if(show_slice_in_obst==ONLY_IN_GAS){
+          glutAddMenuEntry(_("  *gas"), MENU_SHOWSLICE_IN_GAS);
+          glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
+          glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+        }
+        if(show_slice_in_obst==GAS_AND_SOLID){
+          glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
+          glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
+          glutAddMenuEntry(_("  *gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+        }
+        if(show_slice_in_obst==ONLY_IN_SOLID){
+          glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
+          glutAddMenuEntry(_("  *solid"), MENU_SHOWSLICE_IN_SOLID);
+          glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+        }
+      }
+      if(nsliceloaded>0){
+        if(offset_slice==1)glutAddMenuEntry(_("*Offset slice"), MENU_SHOWSLICE_OFFSET);
+        if(offset_slice==0)glutAddMenuEntry(_("Offset slice"), MENU_SHOWSLICE_OFFSET);
+        if(show_node_slices_and_vectors==1)glutAddMenuEntry(_("*Show node centered slices and vectors"), MENU_SHOWSLICE_NODESLICEANDVECTORS);
+        if(show_node_slices_and_vectors==0)glutAddMenuEntry(_("Show node centered slices and vectors"), MENU_SHOWSLICE_NODESLICEANDVECTORS);
+        if(show_cell_slices_and_vectors==1)glutAddMenuEntry(_("*Show cell centered slices and vectors"), MENU_SHOWSLICE_CELLSLICEANDVECTORS);
+        if(show_cell_slices_and_vectors==0)glutAddMenuEntry(_("Show cell centered slices and vectors"), MENU_SHOWSLICE_CELLSLICEANDVECTORS);
+      }
+      if(nfedinfo>0){
+        int showfedmenu = 0;
+
+        for(i = nsliceinfo-nfedinfo;i<nsliceinfo;i++){
+          slicedata *slicei;
+
+          slicei = sliceinfo+i;
+          if(slicei->loaded==1){
+            showfedmenu = 1;
+            break;
+          }
+        }
+        if(showfedmenu==1){
+          if(show_fed_area==1)glutAddMenuEntry(_("*Show FED areas"), MENU_SHOWSLICE_FEDAREA);
+          if(show_fed_area==0)glutAddMenuEntry(_("Show FED areas"), MENU_SHOWSLICE_FEDAREA);
+        }
+      }
+      if(nsliceloaded>0&&sd_shown!=NULL){
+        char menulabel[1024];
+
+        glutAddMenuEntry("-", MENU_DUMMY);
+        STRCPY(menulabel, "");
+        if(showall_slices==1)STRCAT(menulabel, "*");
+        STRCAT(menulabel, sd_shown->label.longlabel);
+        glutAddMenuEntry(menulabel, SHOW_ALL);
+        glutAddMenuEntry("", MENU_DUMMY);
+      }
     }
   }
+  if((nsliceinfo>0&&nmultisliceinfo+nfedinfo<nsliceinfo)||patchgeom_slice_showhide==1){
+    int ii;
+    patchdata *patchim1=NULL;
 
-/* -------------------------------- avatartour menu -------------------------- */
+    CREATEMENU(showmultislicemenu, ShowMultiSliceMenu);
+    for(i = 0;i<nmultisliceinfo;i++){
+      slicedata *sd;
+      char menulabel[1024];
+      multislicedata *mslicei;
+
+      mslicei = multisliceinfo+i;
+      if(mslicei->loaded==0)continue;
+      sd = sliceinfo+mslicei->islices[0];
+      STRCPY(menulabel, "");
+      if(plotstate==DYNAMIC_PLOTS&&mslicei->display!=0&&sd->slicefile_labelindex==slicefile_labelindex){
+        if(mslicei->display==1){
+          STRCAT(menulabel, "*");
+        }
+        else if(mslicei->display==-1){
+          STRCAT(menulabel, "#");
+        }
+      }
+      STRCAT(menulabel, mslicei->menulabel2);
+      if(sd->slicelabel!=NULL){
+        STRCAT(menulabel, " - ");
+        STRCAT(menulabel, sd->slicelabel);
+      }
+      glutAddMenuEntry(menulabel, i);
+    }
+    // loaded geometry slice entries
+    for(ii = 0;ii<npatchinfo;ii++){
+      patchdata *patchi;
+
+      i = patchorderindex[ii];
+      patchi = patchinfo+i;
+      if(patchi->loaded==1&&patchi->filetype_label!=NULL&&strcmp(patchi->filetype_label, "INCLUDE_GEOM")==0){
+        if(patchim1==NULL||strcmp(patchi->label.longlabel, patchim1->label.longlabel)!=0){
+          char mlabel[128];
+
+          strcpy(mlabel, "");
+          if(patchi->display==1)strcat(mlabel, "*");
+          strcat(mlabel, patchi->label.longlabel);
+          glutAddMenuEntry(mlabel, -20-i);
+        }
+        patchim1 = patchi;
+      }
+    }
+    if(nsliceloaded>0){
+      glutAddMenuEntry(_("  Show in:"), MENU_DUMMY);
+      if(show_slice_in_obst==ONLY_IN_GAS){
+        glutAddMenuEntry(_("    *gas"), MENU_SHOWSLICE_IN_GAS);
+        glutAddMenuEntry(_("    solid"), MENU_SHOWSLICE_IN_SOLID);
+        glutAddMenuEntry(_("    gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+      }
+      if(show_slice_in_obst==GAS_AND_SOLID){
+        glutAddMenuEntry(_("    gas"), MENU_SHOWSLICE_IN_GAS);
+        glutAddMenuEntry(_("    solid"), MENU_SHOWSLICE_IN_SOLID);
+        glutAddMenuEntry(_("    *gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+      }
+      if(show_slice_in_obst==ONLY_IN_SOLID){
+        glutAddMenuEntry(_("    gas"), MENU_SHOWSLICE_IN_GAS);
+        glutAddMenuEntry(_("    *solid"), MENU_SHOWSLICE_IN_SOLID);
+        glutAddMenuEntry(_("    gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
+      }
+    }
+    if(nsliceloaded>0){
+      if(offset_slice==1)glutAddMenuEntry(_("*Offset slice"), MENU_SHOWSLICE_OFFSET);
+      if(offset_slice==0)glutAddMenuEntry(_("Offset slice"), MENU_SHOWSLICE_OFFSET);
+    }
+    if(nfedinfo>0){
+      int showfedmenu = 0;
+
+      for(i = nsliceinfo-nfedinfo;i<nsliceinfo;i++){
+        slicedata *slicei;
+
+        slicei = sliceinfo+i;
+        if(slicei->loaded==1){
+          showfedmenu = 1;
+          break;
+        }
+      }
+      if(showfedmenu==1){
+        if(show_fed_area==1)glutAddMenuEntry(_("*Show FED areas"), MENU_SHOWSLICE_FEDAREA);
+        if(show_fed_area==0)glutAddMenuEntry(_("Show FED areas"), MENU_SHOWSLICE_FEDAREA);
+      }
+    }
+    if(nslice_loaded>0)GLUTADDSUBMENU(_("Mesh"), showhideslicemenu);
+  }
+
+/* -------------------------------- avatar tour menu -------------------------- */
 
   CREATEMENU(avatarevacmenu,AvatarEvacMenu);
   if(navatar_types>0){
@@ -7280,19 +8413,22 @@ updatemenu=0;
     }
   }
 
+  CREATEMENU(tourcopymenu, TourCopyMenu);
+  glutAddMenuEntry("Path through domain", -1);
+  for(i = 0; i < ntourinfo; i++){
+    tourdata *touri;
+
+    touri = tourinfo + i;
+    glutAddMenuEntry(touri->menulabel, i);
+  }
+
     /* --------------------------------tour menu -------------------------- */
 
   CREATEMENU(tourmenu,TourMenu);
 
-  glutAddMenuEntry(_("New..."),MENU_TOUR_NEW);
+  GLUTADDSUBMENU(_("New"),tourcopymenu);
   if(ntourinfo>0){
-    if(showtour_dialog==1){
-      glutAddMenuEntry(_("*Edit..."),MENU_TOUR_EDIT);
-    }
-    else{
-      glutAddMenuEntry(_("Edit..."),MENU_TOUR_EDIT);
-    }
-    if(ntourinfo>0)glutAddMenuEntry("-",MENU_DUMMY);
+    glutAddMenuEntry("-",MENU_DUMMY);
     for(i=0;i<ntourinfo;i++){
       tourdata *touri;
       int glui_avatar_index_local;
@@ -7302,7 +8438,7 @@ updatemenu=0;
       if(touri->display==1){
         STRCPY(menulabel,"");
         if(selectedtour_index==i){
-          STRCAT(menulabel,"@");
+          STRCAT(menulabel,"(editing)");
         }
         STRCAT(menulabel,"*");
         STRCAT(menulabel,touri->menulabel);
@@ -7324,6 +8460,7 @@ updatemenu=0;
     if(selectedtour_index>=0){
       char menulabel[1024];
 
+      glutAddMenuEntry("-", MENU_DUMMY);
       strcpy(menulabel,"");
       if(viewtourfrompath==1)strcat(menulabel,"*");
       strcat(menulabel,"View from ");
@@ -7333,24 +8470,15 @@ updatemenu=0;
     glutAddMenuEntry("-",MENU_DUMMY);
     glutAddMenuEntry(_("Show all"),MENU_TOUR_SHOWALL);
     glutAddMenuEntry(_("Hide all"),MENU_TOUR_MANUAL);
+    glutAddMenuEntry(_("Settings..."), MENU_TOUR_SETTINGS);
   }
 
  /* --------------------------------Show Volume smoke menu -------------------------- */
 
   if(nvolsmoke3dloaded>0){
-    CREATEMENU(showvolsmoke3dmenu,ShowVolsmoke3DMenu);
-    if(nvolsmoke3dloaded>1){
-      char vlabel[256];
+    char vlabel[256];
 
-      strcpy(vlabel,_("3D smoke (volume rendered)"));
-      strcat(vlabel,_(" - Show all"));
-      glutAddMenuEntry(vlabel,SHOW_ALL);
-
-      strcpy(vlabel,_("3D smoke (volume rendered)"));
-      strcat(vlabel,_(" - Hide all"));
-      glutAddMenuEntry(vlabel,HIDE_ALL);
-      glutAddMenuEntry("-",MENU_DUMMY);
-    }
+    CREATEMENU(showvolsmokesinglemenu,ShowVolsmoke3DMenu);
     for(i=0;i<nmeshes;i++){
       meshdata *meshi;
       volrenderdata *vr;
@@ -7365,8 +8493,13 @@ updatemenu=0;
       strcat(menulabel,meshi->label);
       glutAddMenuEntry(menulabel,i);
     }
-    glutAddMenuEntry("-",MENU_DUMMY);
-    glutAddSubMenu(_("Smoke colorbar"),smokecolorbarmenu);
+    CREATEMENU(showvolsmoke3dmenu,ShowVolsmoke3DMenu);
+    strcpy(vlabel, "");
+    if(show_volsmokefiles==1)strcat(vlabel, "*");
+    strcat(vlabel,_("Show"));
+    glutAddMenuEntry(vlabel,TOGGLE_VOLSMOKE);
+    GLUTADDSUBMENU(_("Smoke colorbar"),smokecolorbarmenu);
+    GLUTADDSUBMENU(_("Mesh"), showvolsmokesinglemenu);
   }
 
   CREATEMENU(aperturemenu,ApertureMenu);
@@ -7382,16 +8515,20 @@ updatemenu=0;
   if(apertureindex!=4)glutAddMenuEntry("90",4);
 
   CREATEMENU(zoommenu,ZoomMenu);
-  if(zoomindex==0)glutAddMenuEntry("*0.25",0);
-  if(zoomindex!=0)glutAddMenuEntry("0.25",0);
-  if(zoomindex==1)glutAddMenuEntry("*0.50",1);
-  if(zoomindex!=1)glutAddMenuEntry("0.50",1);
-  if(zoomindex==2)glutAddMenuEntry("*1.0",2);
-  if(zoomindex!=2)glutAddMenuEntry("1.0",2);
-  if(zoomindex==3)glutAddMenuEntry("*2.0",3);
-  if(zoomindex!=3)glutAddMenuEntry("2.0",3);
-  if(zoomindex==4)glutAddMenuEntry("*4.0",4);
-  if(zoomindex!=4)glutAddMenuEntry("4.0",4);
+  for(i = 0; i<MAX_ZOOMS+1; i++){
+    char label[64];
+
+    if(zooms[i]>0.0){
+      if(zoomindex==i){
+        sprintf(label, "*%f", zooms[i]);
+      }
+      else{
+        sprintf(label, "%f", zooms[i]);
+      }
+      TrimZeros(label);
+      glutAddMenuEntry(label, i);
+    }
+  }
 
   /* --------------------------------reset menu -------------------------- */
 
@@ -7420,22 +8557,32 @@ updatemenu=0;
       char view_label[255], menu_label[255];
 
       GetNextViewLabel(view_label);
-      sprintf(menu_label, "Save viewpoint as %s", view_label);
+      strcpy(menu_label, _("Save viewpoint as"));
+      strcat(menu_label, " ");
+      strcat(menu_label,view_label);
 
       glutAddMenuEntry(menu_label,SAVE_VIEWPOINT);
       if(current_view != NULL){
         if(strcmp(current_view,startup_view_label)!=0){
-          sprintf(menu_label, "Apply %s at startup", current_view);
+          strcpy(menu_label, _("Apply"));
+          strcat(menu_label, " ");
+          strcat(menu_label, current_view);
+          strcat(menu_label, " ");
+          strcat(menu_label, _("at startup"));
           glutAddMenuEntry(menu_label, MENU_STARTUPVIEW);
         }
       }
       else{
-        sprintf(menu_label, "Save viewpoint as %s and apply at startup", view_label);
+        strcpy(menu_label, _("Save viewpoint as"));
+        strcat(menu_label, " ");
+        strcat(menu_label, view_label);
+        strcat(menu_label, " ");
+        strcat(menu_label, _("and apply at startup"));
         glutAddMenuEntry(menu_label, SAVE_VIEWPOINT_AS_STARTUP);
       }
-      glutAddSubMenu(_("Zoom"),zoommenu);
-      if(projection_type==1)glutAddMenuEntry(_("Switch to perspective view       ALT v"),MENU_SIZEPRESERVING);
-      if(projection_type==0)glutAddMenuEntry(_("Switch to size preserving view   ALT v"),MENU_SIZEPRESERVING);
+      GLUTADDSUBMENU(_("Zoom"),zoommenu);
+      if(projection_type == PROJECTION_ORTHOGRAPHIC)glutAddMenuEntry(_("Switch to perspective view       ALT v"),MENU_SIZEPRESERVING);
+      if(projection_type == PROJECTION_PERSPECTIVE)glutAddMenuEntry(_("Switch to size preserving view   ALT v"),MENU_SIZEPRESERVING);
       glutAddMenuEntry("-",MENU_DUMMY);
     }
     SortCameras();
@@ -7462,30 +8609,31 @@ updatemenu=0;
     glutAddMenuEntry("-",MENU_DUMMY);
     glutAddMenuEntry(_("Time"),MENU_TIMEVIEW);
   }
+  glutAddMenuEntry(_("Settings..."), MENU_VIEWPOINT_SETTINGS);
 
   /* --------------------------------showhide menu -------------------------- */
 
   showhide_data = 0;
   CREATEMENU(showhidemenu,ShowHideMenu);
-  glutAddSubMenu(_("Color"), colorbarmenu);
-  glutAddSubMenu(_("Geometry"),geometrymenu);
-  glutAddSubMenu(_("Labels"),labelmenu);
-  glutAddSubMenu(_("Viewpoints"), resetmenu);
+  GLUTADDSUBMENU(_("Color"), colorbarmenu);
+  GLUTADDSUBMENU(_("Geometry"),geometrymenu);
+  GLUTADDSUBMENU(_("Labels"),labelmenu);
+  GLUTADDSUBMENU(_("Viewpoints"), resetmenu);
   glutAddMenuEntry("-", MENU_DUMMY);
-  if(Read3DSmoke3DFile==1&&nsmoke3dloaded>0){
+  if(nsmoke3dloaded>0){
     showhide_data = 1;
-    glutAddSubMenu(_("3D smoke"), smoke3dshowmenu);
+    GLUTADDSUBMENU(_("3D smoke"), smoke3dshowmenu);
   }
   if(nvolsmoke3dloaded>0){
     char vlabel[256];
 
     showhide_data = 1;
-    strcpy(vlabel, _("3D smoke (volume rendered)"));
-    glutAddSubMenu(vlabel, showvolsmoke3dmenu);
+    strcpy(vlabel, _("3D smoke (Volume rendered)"));
+    GLUTADDSUBMENU(vlabel, showvolsmoke3dmenu);
   }
   if(npatchloaded>0){
     showhide_data = 1;
-    glutAddSubMenu(_("Boundaries"), showpatchmenu);
+    GLUTADDSUBMENU(_("Boundary"), showpatchmenu);
   }
   {
     int human_present=0;
@@ -7504,10 +8652,10 @@ updatemenu=0;
         if(parti->evac==0)particle_present=1;
       }
       if(particle_present==1){
-        glutAddSubMenu(_("Particles"),particlepropshowmenu);
+        GLUTADDSUBMENU(_("Particles"),particlepropshowmenu);
       }
       if(human_present==1){
-        glutAddSubMenu(_("Humans"),humanpropshowmenu);
+        GLUTADDSUBMENU(_("Humans"),humanpropshowmenu);
       }
     }
   }
@@ -7522,59 +8670,33 @@ updatemenu=0;
       if(isoi->loaded==1)niso_loaded++;
     }
 
-    if(niso_loaded>1){
-     glutAddSubMenu(_("Isosurfaces"),isoshowmenu);
-    }
-    else{
-     glutAddSubMenu(_("Isosurfaces"),isoshowmenu);
+    if(niso_loaded>0){
+     GLUTADDSUBMENU(_("Isosurfaces"),isoshowmenu);
     }
     showhide_data = 1;
   }
   if(ReadPlot3dFile==1){
     showhide_data = 1;
-    glutAddSubMenu(_("Plot3D"), plot3dshowmenu);
+    GLUTADDSUBMENU(_("Plot3D"), plot3dshowmenu);
   }
 
-  nvslice0=0, nvslice1=0, nvslice2=0;
-  nvsliceloaded0=0, nvsliceloaded1=0;
-  nvsliceloaded2=0;
-  for(i=0;i<nvsliceinfo;i++){
-    vslicedata *vd;
-
-    vd = vsliceinfo+i;
-    switch(vd->vec_type){
-    case 0:
-      nvslice0++;
-      if(vd->loaded==1)nvsliceloaded0++;
-      break;
-    case 1:
-      nvslice1++;
-      if(vd->loaded==1)nvsliceloaded1++;
-      break;
-    case 2:
-      nvslice2++;
-      if(vd->loaded==1)nvsliceloaded1++;
-      break;
-     default:
-      ASSERT(FFALSE);
-      break;
+  if(nvsliceloaded>0){
+    showhide_data = 1;
+    GLUTADDSUBMENU(_("Vector slice"), showvslicemenu);
+  }
+  if(nsliceloaded>0||patchgeom_slice_showhide==1){
+    showhide_data = 1;
+    if(nmultisliceinfo+nfedinfo<nsliceinfo){
+      GLUTADDSUBMENU(_("Slice"),showmultislicemenu);
     }
-  }
-  if(nvsliceloaded0+nvsliceloaded1+nvsliceloaded2>0){
-    showhide_data = 1;
-    glutAddSubMenu(_("Slices (vector)"), showvslicemenu);
-  }
-  if(nsliceloaded>0){
-    showhide_data = 1;
-    glutAddSubMenu(_("Slices"), showhideslicemenu);
-    if(nmultisliceinfo<nsliceinfo){
-      glutAddSubMenu(_("Multi-Slices"),showmultislicemenu);
+    else{
+      GLUTADDSUBMENU(_("Slice"), showhideslicemenu);
     }
   }
 
   if(nzoneinfo>0&&(ReadZoneFile==1||nzvents>0)){
     showhide_data = 1;
-    glutAddSubMenu(_("Zone"), zoneshowmenu);
+    GLUTADDSUBMENU(_("Zone"), zoneshowmenu);
   }
   if(nobject_defs>0){
     int num_activedevices=0;
@@ -7589,7 +8711,7 @@ updatemenu=0;
     if(num_activedevices>0){
       /*
       if(isZoneFireModel==0||(isZoneFireModel==1&&num_activedevices>1)){
-        glutAddSubMenu(_("Objects"),showobjectsmenu);
+        GLUTADDSUBMENU(_("Objects"),showobjectsmenu);
       }
       */
     }
@@ -7641,7 +8763,7 @@ updatemenu=0;
   if(titlesafe_offset==0)glutAddMenuEntry(_("Offset window"), MENU_SHOWHIDE_OFFSET);
   if(titlesafe_offset!=0)glutAddMenuEntry(_("*Offset window"),MENU_SHOWHIDE_OFFSET);
   if(ntextures_loaded_used>0){
-    glutAddSubMenu(_("Textures"),textureshowmenu);
+    GLUTADDSUBMENU(_("Textures"),textureshowmenu);
   }
 #ifdef pp_MEMPRINT
   glutAddMenuEntry("Show Memory block info",MENU_SHOWHIDE_PRINT);
@@ -7704,65 +8826,43 @@ updatemenu=0;
     }
     strcat(renderwindow3,rendertemp);
 
-    CREATEMENU(startrenderingmenu,RenderMenu);
-    glutAddMenuEntry(_("  One frame (single part)"),RENDER_CURRENT_SINGLE);
-    if(render_current==1){
-      char menulabel[1024];
+    CREATEMENU(render_skipmenu,SkipMenu);
+    for(i = 0;i<NRENDER_SKIPS;i++){
+      char skiplabel[128];
 
-      sprintf(menulabel,"  One frame (%i x %i parts)",nrender_rows,nrender_rows);
-      glutAddMenuEntry(menulabel,RENDER_CURRENT_MULTIPLE);
-    }
-    if(RenderTime==1||touring==1){
-      glutAddMenuEntry(_("  All frames"),1);
-      glutAddMenuEntry(_("  Every 2nd frame"),2);
-      glutAddMenuEntry(_("  Every 3rd frame"),3);
-      glutAddMenuEntry(_("  Every 4th frame"),4);
-      glutAddMenuEntry(_("  Every 5th frame"),5);
-      glutAddMenuEntry(_("  Every 10th frame"),10);
-      glutAddMenuEntry(_("  Every 20th frame"),20);
-      glutAddMenuEntry(_("  Cancel"),RenderCancel);
+      strcpy(skiplabel, "  ");
+      if(render_skip==render_skips[i])strcat(skiplabel, "*");
+      strcat(skiplabel, crender_skips[i]);
+      glutAddMenuEntry(skiplabel, render_skips[i]);
     }
 
     CREATEMENU(resolutionmultipliermenu,RenderMenu);
-    if(nrender_rows==2){
-      glutAddMenuEntry("  *2",HIDEALL_ISO);
-    }
-    else{
-      glutAddMenuEntry("  2",HIDEALL_ISO);
-    }
-    if(nrender_rows==3){
-      glutAddMenuEntry("  *3",10003);
-    }
-    else{
-      glutAddMenuEntry("  3",10003);
-    }
-    if(nrender_rows==4){
-      glutAddMenuEntry("  *4",10004);
-    }
-    else{
-      glutAddMenuEntry("  4",10004);
-    }
-    if(nrender_rows==5){
-      glutAddMenuEntry("  *5",10005);
-    }
-    else{
-      glutAddMenuEntry("  5",10005);
-    }
-    if(nrender_rows==6)glutAddMenuEntry("  *6",10005);
-    if(nrender_rows==7)glutAddMenuEntry("  *7",10005);
-    if(nrender_rows==8)glutAddMenuEntry("  *8",10005);
-    if(nrender_rows==9)glutAddMenuEntry("  *9",10005);
-    if(nrender_rows==10)glutAddMenuEntry("  *10",10005);
+    for(i = 2;i<=10;i++){
+      char render_label[256];
+      int render_index;
 
-    CREATEMENU(rendermenu,RenderMenu);
-    glutAddMenuEntry(_("Resolution:"),11000);
-    glutAddMenuEntry(renderwindow,Render320);
-    glutAddMenuEntry(renderwindow2,Render640);
-    glutAddMenuEntry(renderwindow3,RenderWindow);
+      render_index = 10000+MIN(5, i);
+      if(resolution_multiplier==i){
+        sprintf(render_label, "  *%ix", i);
+        glutAddMenuEntry(render_label, render_index);
+      }
+      else if(i<=5){
+        sprintf(render_label, "  %ix", i);
+        glutAddMenuEntry(render_label, render_index);
+      }
+    }
 
-    if(render_current==1)glutAddSubMenu(_("Resolution multiplier"),resolutionmultipliermenu);
+    CREATEMENU(render_filesuffixmenu, RenderMenu);
+    if(render_label_type==RENDER_LABEL_FRAMENUM){
+      glutAddMenuEntry(_("  *Frame number"),RenderLABELframenumber);
+      glutAddMenuEntry(_("  Time"),RenderLABELtime);
+    }
+    if(render_label_type==RENDER_LABEL_TIME){
+      glutAddMenuEntry(_("  Frame number"),RenderLABELframenumber);
+      glutAddMenuEntry(_("  *Time"),RenderLABELtime);
+    }
 
-    glutAddMenuEntry(_("Type:"),11000);
+    CREATEMENU(render_filetypemenu, RenderMenu);
     if(render_filetype==PNG){
       glutAddMenuEntry("  *PNG",RenderPNG);
       glutAddMenuEntry("  JPEG",RenderJPEG);
@@ -7776,17 +8876,78 @@ updatemenu=0;
       glutAddMenuEntry("  JPEG",RenderJPEG);
     }
 
-    glutAddMenuEntry(_("File suffix:"),11000);
-    if(render_label_type==RENDER_LABEL_FRAMENUM){
-      glutAddMenuEntry(_("  *Frame number"),RenderLABELframenumber);
-      glutAddMenuEntry(_("  Time"),RenderLABELtime);
-    }
-    if(render_label_type==RENDER_LABEL_TIME){
-      glutAddMenuEntry(_("  Frame number"),RenderLABELframenumber);
-      glutAddMenuEntry(_("  *Time"),RenderLABELtime);
+    CREATEMENU(render_startmenu,RenderMenu);
+    {
+      char sizeORIGRES[128], sizeHIGHRES[128];
+      int width, height, factor;
+
+      if(render_current==1){
+        width = screenWidth;
+        height = screenHeight;
+      }
+      else{
+        width = renderW;
+        height = renderH;
+      }
+
+      factor = glui_resolution_multiplier;
+      sprintf(sizeORIGRES, "%ix%i", width, height);
+      sprintf(sizeHIGHRES, "%ix%i", width*factor, height*factor);
+      glutAddMenuEntry(sizeORIGRES, RenderStartORIGRES);
+      glutAddMenuEntry(sizeHIGHRES, RenderStartHIGHRES);
+      {
+        char rend_label[100];
+#ifdef pp_DEG
+        unsigned char deg360[] = {'3','6','0',DEG_SYMBOL,0};
+#else
+        unsigned char deg360[] = {'3','6','0',0};
+#endif
+
+        sprintf(rend_label,"%s - %ix%i",deg360,nwidth360, nheight360);
+        glutAddMenuEntry(rend_label, RenderStart360);
+      }
     }
 
-    glutAddSubMenu(_("Start rendering:"),startrenderingmenu);
+    CREATEMENU(render_resolutionmenu, RenderMenu);
+    glutAddMenuEntry(renderwindow,    Render320);
+    glutAddMenuEntry(renderwindow2,   Render640);
+    glutAddMenuEntry(renderwindow3,   RenderWindow);
+
+    CREATEMENU(rendermenu,RenderMenu);
+    GLUTADDSUBMENU(_("Start rendering"),  render_startmenu);
+    glutAddMenuEntry(_("Stop rendering"), RenderCancel);
+    glutAddMenuEntry("-", MENU_DUMMY);
+    glutAddMenuEntry(_("Render html(current)"), RenderHTML);
+    glutAddMenuEntry(_("Render html(all)"),     RenderHTMLALL);
+    glutAddMenuEntry(_("Render json(current)"),  RenderJSON);
+    glutAddMenuEntry(_("Render json(all)"),     RenderJSONALL);
+
+    glutAddMenuEntry("-", MENU_DUMMY);
+
+    {
+    char skip_label[128];
+
+    if(render_skip==1){
+      strcpy(skip_label,"Frames/all");
+    }
+    else if(render_skip==RENDER_CURRENT_SINGLE){
+      sprintf(skip_label, "Frames/Current");
+    }
+    else{
+      sprintf(skip_label, "Frames/%i", render_skip);
+    }
+    GLUTADDSUBMENU(skip_label, render_skipmenu);
+}
+    GLUTADDSUBMENU(_("Image size"),  render_resolutionmenu);
+    if(render_current==1){
+      char res_menu[128];
+
+      sprintf(res_menu, "Image size multiplier/%ix", resolution_multiplier);
+      GLUTADDSUBMENU(res_menu, resolutionmultipliermenu);
+    }
+    GLUTADDSUBMENU(_("Image type"),        render_filetypemenu);
+    GLUTADDSUBMENU(_("Image suffix"), render_filesuffixmenu);
+    glutAddMenuEntry(_("Settings..."), MENU_RENDER_SETTINGS);
     UpdateGluiRender();
   }
 
@@ -7809,12 +8970,18 @@ updatemenu=0;
   /* --------------------------------viewdialog menu -------------------------- */
 
   CREATEMENU(viewdialogmenu, DialogMenu);
-  glutAddMenuEntry(_("Create/edit tours...  ALT t"), DIALOG_TOUR);
+  if(showtour_dialog==1)glutAddMenuEntry(_("*Create/edit tours...  ALT t"), DIALOG_TOUR_HIDE);
+  if(showtour_dialog==0)glutAddMenuEntry(_("Create/edit tours...  ALT t"), DIALOG_TOUR_SHOW);
   glutAddMenuEntry(_("Edit colorbar...  ALT C"), DIALOG_COLORBAR);
   if(isZoneFireModel==0){
     glutAddMenuEntry(_("Examine geometry...  ALT e"), DIALOG_GEOMETRY);
   }
-  glutAddMenuEntry(_("Stereo settings..."), DIALOG_STEREO);
+  if(have_vr==1){
+    glutAddMenuEntry(_("Stereo/VR settings..."), DIALOG_STEREO);
+  }
+  else{
+    glutAddMenuEntry(_("Stereo settings..."), DIALOG_STEREO);
+  }
   if(trainer_active==1){
     glutAddMenuEntry(_("Trainer..."), DIALOG_TRAINER);
   }
@@ -7848,19 +9015,24 @@ updatemenu=0;
 
   glutAddMenuEntry(_("Clip scene...  ALT c"), DIALOG_CLIP);
   glutAddMenuEntry(_("Data bounds... ALT b"), DIALOG_BOUNDS);
+#ifdef pp_GLUTGET
+  glutAddMenuEntry(_("Display...  ALT D"), DIALOG_DISPLAY);
+#else
   glutAddMenuEntry(_("Display...  ALT d"), DIALOG_DISPLAY);
-  glutAddMenuEntry(_("Motion...  ALT m"),DIALOG_MOTION);
+#endif
+  glutAddMenuEntry(_("Motion/View/Render...  ALT m"),DIALOG_MOTION);
   glutAddMenuEntry(_("Viewpoints... ALT g"),DIALOG_VIEW);
 
   glutAddMenuEntry("-",MENU_DUMMY2);
 
-  glutAddSubMenu(_("Data"), datadialogmenu);
-  glutAddSubMenu(_("Files"), filesdialogmenu);
-  glutAddSubMenu(_("View"), viewdialogmenu);
-  glutAddSubMenu(_("Window"), windowdialogmenu);
+  GLUTADDSUBMENU(_("Data"), datadialogmenu);
+  GLUTADDSUBMENU(_("Files"), filesdialogmenu);
+  GLUTADDSUBMENU(_("View"), viewdialogmenu);
+  GLUTADDSUBMENU(_("Window"), windowdialogmenu);
 
   glutAddMenuEntry("-",MENU_DUMMY2);
-  glutAddMenuEntry(_("Close all dialogs  ALT x"),DIALOG_HIDEALL);
+  glutAddMenuEntry(_("Shrink all dialogs ALT X"), DIALOG_SHRINKALL);
+  glutAddMenuEntry(_("Close all dialogs  ALT x"), DIALOG_HIDEALL);
 
   /* -------------------------------- font menu -------------------------- */
 
@@ -7892,6 +9064,7 @@ updatemenu=0;
       ASSERT(FFALSE);
       break;
     }
+    glutAddMenuEntry(_("Settings..."), MENU_FONT_SETTINGS);
   }
 
   /* -------------------------------- units menu -------------------------- */
@@ -7931,14 +9104,14 @@ updatemenu=0;
 
       uci = unitclasses + i;
       if(uci->visible==1||show_all_units==1||strcmp(uci->unitclass,"Distance")==0){
-        glutAddSubMenu(uci->unitclass,uci->submenuid);
+        GLUTADDSUBMENU(uci->unitclass,uci->submenuid);
       }
     }
     if(vishmsTimelabel==0)glutAddMenuEntry(_("time (h:m:s)"), MENU_UNITS_HMS);
     if(vishmsTimelabel==1)glutAddMenuEntry(_("*time (h:m:s)"), MENU_UNITS_HMS);
 #ifdef pp_BETA
-    if(show_all_units==1)glutAddMenuEntry("*show all units", MENU_UNITS_SHOWALL);
-    if(show_all_units==0)glutAddMenuEntry("show all units", MENU_UNITS_SHOWALL);
+    if(show_all_units==1)glutAddMenuEntry(_("*show all units"), MENU_UNITS_SHOWALL);
+    if(show_all_units==0)glutAddMenuEntry(_("show all units"), MENU_UNITS_SHOWALL);
 #endif
     glutAddMenuEntry(_("Reset"), MENU_UNITS_RESET);
   }
@@ -7946,12 +9119,12 @@ updatemenu=0;
 /* --------------------------------option menu -------------------------- */
 
   CREATEMENU(optionmenu,OptionMenu);
-  if(nunitclasses>0)glutAddSubMenu(_("Display Units"),unitsmenu);
-  glutAddSubMenu(_("Rotation type"),rotatetypemenu);
-  glutAddSubMenu(_("Max frame rate"),frameratemenu);
-  glutAddSubMenu(_("Render"),rendermenu);
-  glutAddSubMenu(_("Tours"),tourmenu);
-  if(showfontmenu==1)glutAddSubMenu(_("Font"),fontmenu);
+  if(nunitclasses>0)GLUTADDSUBMENU(_("Display Units"),unitsmenu);
+  GLUTADDSUBMENU(_("Rotation parameters"),rotatetypemenu);
+  GLUTADDSUBMENU(_("Max frame rate"),frameratemenu);
+  GLUTADDSUBMENU(_("Render"),rendermenu);
+  GLUTADDSUBMENU(_("Tours"),tourmenu);
+  if(showfontmenu==1)GLUTADDSUBMENU(_("Font"),fontmenu);
   if(trainer_active==1)glutAddMenuEntry(_("Trainer menu"),MENU_OPTION_TRAINERMENU);
 
 /* -------------------------------- about menu -------------------------- */
@@ -7983,9 +9156,17 @@ updatemenu=0;
     char version_label[256];
 #endif
     char menulabel[1024];
+    char compiler_version_label[256];
 
-    sprintf(menulabel,"  Smokeview (64 bit) build: %s",smv_githash);
+    sprintf(menulabel,"  Smokeview build: %s",smv_githash);
     glutAddMenuEntry(menulabel,1);
+#ifndef pp_COMPVER
+#define pp_COMPVER "unknown"
+#endif
+    strcpy(compiler_version_label, _("    Compiler version:"));
+    strcat(compiler_version_label, " ");
+    strcat(compiler_version_label, pp_COMPVER);
+    glutAddMenuEntry(compiler_version_label, 1);
     if(fds_version!=NULL){
       sprintf(menulabel, "  FDS version: %s", fds_version);
       glutAddMenuEntry(menulabel, 1);
@@ -8012,25 +9193,7 @@ updatemenu=0;
     }
     glutAddMenuEntry(menulabel,1);
 #endif
-#ifdef pp_CULL
-    if(cullactive==1&&gpuactive==1){
-      if(cullsmoke==1&&usegpu==1){
-        strcpy(menulabel,_("  Smoke culling activated. (Press C to deactivate)"));
-      }
-      else{
-        strcpy(menulabel,_("  Smoke culling available but not in use. ( To activate: "));
-        strcat(menulabel,_(" Press"));
-        if(usegpu==0 && cullsmoke==1)strcat(menulabel," G.)");
-        if(usegpu==1 && cullsmoke==0)strcat(menulabel," C.)");
-        if(usegpu==0 && cullsmoke==0)strcat(menulabel," G then C.)");
-      }
-    }
-    else{
-      strcpy(menulabel,_("  Smoke culling not available"));
-    }
-    glutAddMenuEntry(menulabel,1);
-#endif
-    glutAddSubMenu(_("Disclaimer"),disclaimermenu);
+    GLUTADDSUBMENU(_("Disclaimer"),disclaimermenu);
   }
 
   /* --------------------------------web help menu -------------------------- */
@@ -8074,6 +9237,8 @@ updatemenu=0;
       glutAddMenuEntry(_("     (also, toggles cell center display on/off)"), MENU_DUMMY);
       glutAddMenuEntry(_("  @: display FDS values in cell centered slices"), MENU_DUMMY);
     }
+    glutAddMenuEntry(_("  ,: toggle colorbar display (vertical, horizontal, hidden)"), MENU_DUMMY);
+    glutAddMenuEntry(_("  :: toggle timebar region overlap (always, never, only if timebar/horizontal colorbar hidden)"), MENU_DUMMY);
     glutAddMenuEntry(_("  u: reload files"), MENU_DUMMY);
     glutAddMenuEntry(_("  H: toggle  visibility of slice and vector slice files"), MENU_DUMMY);
     glutAddMenuEntry(_("  I: toggle  visibility of slices in blockages"), MENU_DUMMY);
@@ -8100,10 +9265,25 @@ updatemenu=0;
     glutAddMenuEntry(_("  s: change interval between adjacent vectors"), MENU_DUMMY);
     glutAddMenuEntry(_("  c: toggle between continuous and 2D stepped contours"), MENU_DUMMY);
     glutAddMenuEntry(_("  i: toggle iso-surface visibility"), MENU_DUMMY);
+    glutAddMenuEntry(_("  {: load previous time Plot3D files"), MENU_DUMMY);
+    glutAddMenuEntry(_("  }: load next time Plot3D files"), MENU_DUMMY);
   }
   glutAddMenuEntry(_("Misc"), MENU_DUMMY);
-  glutAddMenuEntry(_("  r: render the current scene to an image file"), MENU_DUMMY);
-  glutAddMenuEntry(_("  R:   (same as r but at twice the resolution)"), MENU_DUMMY);
+  glutAddMenuEntry(_("  r/R: render the current scene to an image file"), MENU_DUMMY);
+  glutAddMenuEntry("             r: image has the same resolution as the scene", MENU_DUMMY);
+  {
+    char render_label[1024];
+#ifdef pp_DEG
+    unsigned char deg360[] = {'3','6','0',DEG_SYMBOL,0};
+#else
+    unsigned char deg360[] = {'3','6','0',0};
+#endif
+
+    sprintf(render_label, "            R: image has %i times the resolution of of scene", MAX(2,resolution_multiplier));
+    glutAddMenuEntry(render_label, MENU_DUMMY);
+    sprintf(render_label, "    ALT R: %s view - all view directions are shown in a 1024x512 image", deg360);
+    glutAddMenuEntry(render_label, MENU_DUMMY);
+  }
   if(ntotal_blockages>0||isZoneFireModel==1){
     glutAddMenuEntry(_("  g: toggle grid visibility"), MENU_DUMMY);
   }
@@ -8130,15 +9310,19 @@ updatemenu=0;
   if(caseini_filename!=NULL&&strlen(caseini_filename)>0){
     char inilabel[512];
 
-    sprintf(inilabel,_("  #: save settings to %s"),caseini_filename);
+    sprintf(inilabel,"  #: save settings to %s",caseini_filename);
     glutAddMenuEntry(inilabel,MENU_DUMMY);
   }
   else{
     glutAddMenuEntry(_("  #: save settings (create casename.ini file)"), MENU_DUMMY);
   }
+  if(ngeominfo){
+    glutAddMenuEntry(_("  =: toggle vertex selected in examine geometry dialog"), MENU_DUMMY);
+  }
   glutAddMenuEntry(_("  !: snap scene to closest 45 degree orientation"), MENU_DUMMY);
   glutAddMenuEntry(_("  ~: level the scene"),2);
-  glutAddMenuEntry(_("  &: toggle line anti-aliasing (draw lines smoothly)"), MENU_DUMMY);
+  glutAddMenuEntry(_("  &&: toggle line anti-aliasing (draw lines smoothly)"), MENU_DUMMY);
+  glutAddMenuEntry(_("  /: toggle parallel particle loading"), MENU_DUMMY);
 
   /* --------------------------------mouse help menu -------------------------- */
 
@@ -8181,10 +9365,10 @@ updatemenu=0;
   /* --------------------------------help menu -------------------------- */
 
   CREATEMENU(helpmenu,HelpMenu);
-  glutAddSubMenu(_("Online"),webhelpmenu);
-  glutAddSubMenu(_("Shortcuts"),keyboardhelpmenu);
-  glutAddSubMenu(_("Mouse"),mousehelpmenu);
-  glutAddSubMenu(_("About"),aboutmenu);
+  GLUTADDSUBMENU(_("Online"),webhelpmenu);
+  GLUTADDSUBMENU(_("Shortcuts"),keyboardhelpmenu);
+  GLUTADDSUBMENU(_("Mouse"),mousehelpmenu);
+  GLUTADDSUBMENU(_("About"),aboutmenu);
 
   /* --------------------------------particle menu -------------------------- */
 
@@ -8203,8 +9387,6 @@ updatemenu=0;
         glutAddMenuEntry(menulabel,i);
       }
     }
-
-    glutAddMenuEntry(_("Unload all"),MENU_UNLOADPARTICLE_UNLOADALL);
 
     if(nmeshes==1){
       CREATEMENU(particlemenu,LoadParticleMenu);
@@ -8232,23 +9414,18 @@ updatemenu=0;
       CREATEMENU(particlemenu,LoadParticleMenu);
       if(npartinfo > 0){
         strcpy(menulabel, _("Particles"));
-        strcat(menulabel, " - ");
-        strcat(menulabel, _("All meshes"));
         glutAddMenuEntry(menulabel, MENU_PARTICLE_ALLMESHES);
-        strcpy(menulabel, _("Particles"));
-        strcat(menulabel, " - ");
-        strcat(menulabel, _("Single mesh"));
-        glutAddSubMenu(menulabel, particlesubmenu);
-        glutAddMenuEntry("-", MENU_PARTICLE_DUMMY);
+        strcpy(menulabel, "Mesh");
+        GLUTADDSUBMENU(menulabel, particlesubmenu);
       }
     }
-
-    if(npartloaded<=1){
-      glutAddMenuEntry(_("Unload"),MENU_PARTICLE_UNLOAD);
+    if(partfast==1)glutAddMenuEntry(_("*Fast loading"), MENU_PART_PARTFAST);
+    if(partfast==0)glutAddMenuEntry(_("Fast loading"), MENU_PART_PARTFAST);
+    glutAddMenuEntry(_("Settings..."), MENU_PART_SETTINGS);
+    if(npartloaded>=1){
+      if(npartloaded>1)GLUTADDSUBMENU(_("Unload"),unloadpartmenu);
+      glutAddMenuEntry(_("Unload all"), MENU_PARTICLE_UNLOAD_ALL);
     }
-     else{
-       glutAddSubMenu(_("Unload"),unloadpartmenu);
-     }
   }
 
   if(nevac>0){
@@ -8304,7 +9481,7 @@ updatemenu=0;
         glutAddMenuEntry(_("Unload"),MENU_EVAC_UNLOADALL);
       }
        else{
-         glutAddSubMenu(_("Unload"),unloadevacmenu);
+         GLUTADDSUBMENU(_("Unload"),unloadevacmenu);
        }
   }
     }
@@ -8313,135 +9490,6 @@ updatemenu=0;
 
   if(nvsliceinfo>0){
     int ii;
-
-    if(nmultivsliceinfo<nvsliceinfo){
-      CREATEMENU(unloadmultivslicemenu,UnloadMultiVSliceMenu);
-      for(i=0;i<nmultivsliceinfo;i++){
-        multivslicedata *mvslicei;
-
-        mvslicei = multivsliceinfo + i;
-        if(mvslicei->loaded!=0){
-          glutAddMenuEntry(mvslicei->menulabel2,i);
-        }
-      }
-      glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
-
-      nloadsubmvslicemenu=1;
-      for(i=1;i<nmultivsliceinfo;i++){
-        vslicedata *vi, *vim1;
-        slicedata *si, *sim1;
-
-        vi = vsliceinfo + (multivsliceinfo+i)->ivslices[0];
-        vim1 = vsliceinfo + (multivsliceinfo+i-1)->ivslices[0];
-        si = sliceinfo + vi->ival;
-        sim1 = sliceinfo + vim1->ival;
-        if(strcmp(si->label.longlabel,sim1->label.longlabel)!=0){
-          nloadsubmvslicemenu++;
-        }
-      }
-      NewMemory((void **)&loadsubmvslicemenu,nloadsubmvslicemenu*sizeof(int));
-      for(i=0;i<nloadsubmvslicemenu;i++){
-        loadsubmvslicemenu[i]=0;
-      }
-
-      nmultisliceloaded=0;
-      nloadsubmvslicemenu=0;
-      for(i=0;i<nmultivsliceinfo;i++){
-        vslicedata *vi, *vim1;
-        slicedata *si, *sim1;
-        char menulabel[1024];
-        multivslicedata *mvslicei;
-
-        mvslicei = multivsliceinfo + i;
-
-        vi = vsliceinfo + mvslicei->ivslices[0];
-        si = sliceinfo + vi->ival;
-        if(i>0){
-          vim1 = vsliceinfo + (multivsliceinfo+i-1)->ivslices[0];
-          sim1 = sliceinfo + vim1->ival;
-        }
-        if(i==0||(i!=0&&strcmp(si->label.longlabel,sim1->label.longlabel)!=0)){
-          CREATEMENU(loadsubmvslicemenu[nloadsubmvslicemenu],LoadMultiVSliceMenu);
-          nloadsubmvslicemenu++;
-        }
-
-        STRCPY(menulabel,"");
-        if(mvslicei->loaded==1){
-          STRCAT(menulabel,"*");
-          nmultisliceloaded++;
-        }
-        else if(mvslicei->loaded==-1){
-          STRCAT(menulabel,"#");
-        }
-        else{
-        }
-        STRCAT(menulabel,mvslicei->menulabel);
-        if(si->slicelabel!=NULL){
-          STRCAT(menulabel," - ");
-          STRCAT(menulabel,si->slicelabel);
-        }
-        glutAddMenuEntry(menulabel,i);
-      }
-
-      nloadsubmvslicemenu=0;
-      CREATEMENU(loadmultivslicemenu,LoadMultiVSliceMenu);
-      for(i=0;i<nmultivsliceinfo;i++){
-        vslicedata *vi, *vim1;
-        slicedata *si, *sim1;
-
-        vi = vsliceinfo + (multivsliceinfo+i)->ivslices[0];
-        si = sliceinfo + vi->ival;
-        if(i>0){
-          vim1 = vsliceinfo + (multivsliceinfo+i-1)->ivslices[0];
-          sim1 = sliceinfo + vim1->ival;
-        }
-        if(i==0||(i>0&&strcmp(si->label.longlabel,sim1->label.longlabel)!=0)){
-          if(si->vec_comp==0||showallslicevectors==1){
-            char mlabel[1024], mlabel2[1024];
-
-            STRCPY(mlabel,si->label.longlabel);
-            if((i==0&&si->mesh_type>0)||(i>0&&si->mesh_type!=sim1->mesh_type)){
-              sprintf(mlabel2,"*** Evac type %i meshes ***",si->mesh_type);
-              glutAddMenuEntry(mlabel2,MENU_DUMMY);
-            }
-            glutAddSubMenu(mlabel,loadsubmvslicemenu[nloadsubmvslicemenu]);
-          }
-          nloadsubmvslicemenu++;
-        }
-      }
-      if(nmultivsliceinfo>0)glutAddMenuEntry("-",MENU_DUMMY);
-      if(nslicedups > 0){
-        glutAddMenuEntry("Duplicate vector slices", MENU_DUMMY);
-        if(vectorslicedup_option == SLICEDUP_KEEPALL){
-          glutAddMenuEntry("  *keep all", MENU_KEEP_ALL);
-        }
-        else{
-          glutAddMenuEntry("  keep all", MENU_KEEP_ALL);
-        }
-        if(vectorslicedup_option == SLICEDUP_KEEPFINE){
-          glutAddMenuEntry("  *keep fine", MENU_KEEP_FINE);
-        }
-        else{
-          glutAddMenuEntry("  keep fine", MENU_KEEP_FINE);
-        }
-        if(vectorslicedup_option == SLICEDUP_KEEPCOARSE){
-          glutAddMenuEntry("  *keep coarse", MENU_KEEP_COARSE);
-        }
-        else{
-          glutAddMenuEntry("  keep coarse", MENU_KEEP_COARSE);
-        }
-        glutAddMenuEntry("-", MENU_DUMMY);
-      }
-
-      if(showallslicevectors == 0)glutAddMenuEntry(_("Show all vector slice menu entries"), MENU_LOADVSLICE_SHOWALL);
-      if(showallslicevectors == 1)glutAddMenuEntry(_("*Show all vector slice menu entries"), MENU_LOADVSLICE_SHOWALL);
-      if(nmultisliceloaded>1){
-        glutAddSubMenu(_("Unload"),unloadmultivslicemenu);
-      }
-      else{
-        glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
-      }
-    }
 
     CREATEMENU(unloadvslicemenu,UnloadVSliceMenu);
     for(ii=0;ii<nvsliceinfo;ii++){
@@ -8453,11 +9501,11 @@ updatemenu=0;
       glutAddMenuEntry(vd->menulabel2,i);
     }
     glutAddMenuEntry("-",MENU_DUMMY);
-    //glutAddMenuEntry("Unload last",-2);
     glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
 
-    if(nvslice0>0){
+    if(nvsliceinfo>0){
       vslicedata *vd, *vdim1,*vdip1;
+
       if(nvsliceinfo>0){
         nloadsubvslicemenu=1;
         for(ii=1;ii<nvsliceinfo;ii++){
@@ -8506,30 +9554,31 @@ updatemenu=0;
           else{
             STRCPY(menulabel,sd->menulabel);
           }
-          if(sd->vec_comp==0||showallslicevectors==1)glutAddMenuEntry(menulabel,i);
+          glutAddMenuEntry(menulabel,i);
           if(ii==nvsliceinfo-1||strcmp(sd->label.longlabel,sdp1->label.longlabel)!=0){
             subvslice_menuindex[nloadsubvslicemenu]=vsliceorderindex[ii];
             if(sd->ndirxyz[1]+sd->ndirxyz[2]+sd->ndirxyz[3]>1){
               glutAddMenuEntry("-",MENU_DUMMY);
             }
             if(sd->ndirxyz[1]>1){
-              glutAddMenuEntry(_("Load All x"),-1000-4*nloadsubvslicemenu-1);
+              glutAddMenuEntry(_A(_("Load all")," x"),-1000-4*nloadsubvslicemenu-1);
             }
             if(sd->ndirxyz[2]>1){
-              glutAddMenuEntry(_("Load All y"),-1000-4*nloadsubvslicemenu-2);
+              glutAddMenuEntry(_A(_("Load all"), "y"),-1000-4*nloadsubvslicemenu-2);
             }
             if(sd->ndirxyz[3]>1){
-              glutAddMenuEntry(_("Load All z"),-1000-4*nloadsubvslicemenu-3);
+              glutAddMenuEntry(_A(_("Load all"), "z"),-1000-4*nloadsubvslicemenu-3);
             }
             if(sd->ndirxyz[1]+sd->ndirxyz[2]+sd->ndirxyz[3]>1){
-              glutAddMenuEntry(_("Load All"),-1000-4*nloadsubvslicemenu);
+              glutAddMenuEntry(_("Load all"),-1000-4*nloadsubvslicemenu);
             }
           }
           if(ii==0||strcmp(sd->label.longlabel,sdm1->label.longlabel)!=0){
             nloadsubvslicemenu++;
           }
         }
-        CREATEMENU(vslicemenu,LoadVSliceMenu);
+
+        CREATEMENU(vsliceloadmenu,LoadVSliceMenu);
         nloadsubvslicemenu=0;
         for(ii=0;ii<nvsliceinfo;ii++){
           slicedata *sd, *sdm1;
@@ -8542,345 +9591,620 @@ updatemenu=0;
             sdm1 = sliceinfo + vdim1->ival;
           }
           if(ii==0||strcmp(sd->label.longlabel,sdm1->label.longlabel)!=0){
-            if(sd->vec_comp==0||showallslicevectors==1){
-              char mlabel[1024], mlabel2[1024];
+            char mlabel[1024], mlabel2[1024];
 
-              STRCPY(mlabel,sd->label.longlabel);
-              if((ii==0&&sd->mesh_type>0)||(ii>0&&sd->mesh_type!=sdm1->mesh_type)){
-                sprintf(mlabel2,"*** Evac type %i meshdata ***",sd->mesh_type);
-                glutAddMenuEntry(mlabel2,MENU_DUMMY);
-              }
-              glutAddSubMenu(mlabel,loadsubvslicemenu[nloadsubvslicemenu]);
+            STRCPY(mlabel,sd->label.longlabel);
+            if((ii==0&&sd->mesh_type>0)||(ii>0&&sd->mesh_type!=sdm1->mesh_type)){
+              sprintf(mlabel2,"*** Evac type %i meshdata ***",sd->mesh_type);
+              glutAddMenuEntry(mlabel2,MENU_DUMMY);
             }
+            GLUTADDSUBMENU(mlabel,loadsubvslicemenu[nloadsubvslicemenu]);
             nloadsubvslicemenu++;
           }
         }
+
+    if(nmultivsliceinfo<nvsliceinfo){
+      CREATEMENU(unloadmultivslicemenu,UnloadMultiVSliceMenu);
+      for(i=0;i<nmultivsliceinfo;i++){
+        multivslicedata *mvslicei;
+
+        mvslicei = multivsliceinfo + i;
+        if(mvslicei->loaded!=0){
+          glutAddMenuEntry(mvslicei->menulabel2,i);
+        }
+      }
+      glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
+
+      nloadsubmvslicemenu=1;
+      for(i=1;i<nmultivsliceinfo;i++){
+        vslicedata *vi, *vim1;
+        slicedata *si, *sim1;
+
+        vi = vsliceinfo + (multivsliceinfo+i)->ivslices[0];
+        vim1 = vsliceinfo + (multivsliceinfo+i-1)->ivslices[0];
+        si = sliceinfo + vi->ival;
+        sim1 = sliceinfo + vim1->ival;
+        if(strcmp(si->label.longlabel,sim1->label.longlabel)!=0){
+          nloadsubmvslicemenu++;
+        }
+      }
+      NewMemory((void **)&loadsubmvslicemenu,nloadsubmvslicemenu*sizeof(int));
+      for(i=0;i<nloadsubmvslicemenu;i++){
+        loadsubmvslicemenu[i]=0;
+      }
+
+      nmultisliceloaded=0;
+      nloadsubmvslicemenu=0;
+      for(i=0;i<nmultivsliceinfo;i++){
+        vslicedata *vi, *vim1, *vip1;
+        slicedata *si, *sim1, *sip1;
+        char menulabel[1024];
+        multivslicedata *mvslicei;
+
+        mvslicei = multivsliceinfo + i;
+
+        if(i>0){
+          vim1 = vsliceinfo + (multivsliceinfo+i-1)->ivslices[0];
+          sim1 = sliceinfo + vim1->ival;
+        }
+        vi = vsliceinfo + mvslicei->ivslices[0];
+        si = sliceinfo + vi->ival;
+        if(i<nmultivsliceinfo-1){
+          vip1 = vsliceinfo + (multivsliceinfo+i+1)->ivslices[0];
+          sip1 = sliceinfo + vip1->ival;
+        }
+        if(i==0||strcmp(si->label.longlabel,sim1->label.longlabel)!=0){
+          CREATEMENU(loadsubmvslicemenu[nloadsubmvslicemenu],LoadMultiVSliceMenu);
+          msubvslice_menuindex[nloadsubmvslicemenu] = vi->ival;
+        }
+
+        STRCPY(menulabel,"");
+        if(mvslicei->loaded==1){
+          STRCAT(menulabel,"*");
+          nmultisliceloaded++;
+        }
+        else if(mvslicei->loaded==-1){
+          STRCAT(menulabel,"#");
+        }
+        else{
+        }
+        STRCAT(menulabel,mvslicei->menulabel);
+        if(si->slicelabel!=NULL){
+          STRCAT(menulabel," - ");
+          STRCAT(menulabel,si->slicelabel);
+        }
+        glutAddMenuEntry(menulabel,i);
+        if(i==nmultivsliceinfo-1||strcmp(si->label.longlabel,sip1->label.longlabel)!=0){
+          if(mvslicei->ndirxyz[1]+ mvslicei->ndirxyz[2] + mvslicei->ndirxyz[3]>1){
+            glutAddMenuEntry("-",MENU_DUMMY);
+          }
+          if(mvslicei->ndirxyz[1]>1){
+            glutAddMenuEntry(_A(_("Load all"), " x"),-1000-4*nloadsubmvslicemenu-1);
+          }
+          if(mvslicei->ndirxyz[2]>1){
+            glutAddMenuEntry(_A(_("Load all"), " y"),-1000-4*nloadsubmvslicemenu-2);
+          }
+          if(mvslicei->ndirxyz[3]>1){
+            glutAddMenuEntry(_A(_("Load all"), " z"),-1000-4*nloadsubmvslicemenu-3);
+          }
+          if(mvslicei->ndirxyz[1]+mvslicei->ndirxyz[2]+mvslicei->ndirxyz[3]>1){
+            glutAddMenuEntry(_("Load all"),-1000-4*nloadsubmvslicemenu);
+          }
+        }
+        if(i==0||strcmp(si->label.longlabel,sim1->label.longlabel)!=0){
+          nloadsubmvslicemenu++;
+        }
+      }
+
+      if(nslicedups > 0){
+        CREATEMENU(duplicatevectorslicemenu,LoadMultiVSliceMenu);
+        if(vectorslicedup_option == SLICEDUP_KEEPALL){
+          glutAddMenuEntry(_("  *keep all"), MENU_KEEP_ALL);
+        }
+        else{
+          glutAddMenuEntry(_("  keep all"), MENU_KEEP_ALL);
+        }
+        if(vectorslicedup_option == SLICEDUP_KEEPFINE){
+          glutAddMenuEntry(_("  *keep fine"), MENU_KEEP_FINE);
+        }
+        else{
+          glutAddMenuEntry(_("  keep fine"), MENU_KEEP_FINE);
+        }
+        if(vectorslicedup_option == SLICEDUP_KEEPCOARSE){
+          glutAddMenuEntry(_("  *keep coarse"), MENU_KEEP_COARSE);
+        }
+        else{
+          glutAddMenuEntry(_("  keep coarse"), MENU_KEEP_COARSE);
+        }
+      }
+      nloadsubmvslicemenu=0;
+      CREATEMENU(loadmultivslicemenu,LoadMultiVSliceMenu);
+      for(i=0;i<nmultivsliceinfo;i++){
+        vslicedata *vi, *vim1;
+        slicedata *si, *sim1;
+
+        vi = vsliceinfo + (multivsliceinfo+i)->ivslices[0];
+        si = sliceinfo + vi->ival;
+        if(i>0){
+          vim1 = vsliceinfo + (multivsliceinfo+i-1)->ivslices[0];
+          sim1 = sliceinfo + vim1->ival;
+        }
+        if(i==0||(i>0&&strcmp(si->label.longlabel,sim1->label.longlabel)!=0)){
+          char mlabel[1024], mlabel2[1024];
+
+          STRCPY(mlabel,si->label.longlabel);
+          if((i==0&&si->mesh_type>0)||(i>0&&si->mesh_type!=sim1->mesh_type)){
+            sprintf(mlabel2,"*** Evac type %i meshes ***",si->mesh_type);
+            glutAddMenuEntry(mlabel2,MENU_DUMMY);
+          }
+          GLUTADDSUBMENU(mlabel,loadsubmvslicemenu[nloadsubmvslicemenu]);
+          nloadsubmvslicemenu++;
+        }
+      }
+      if(nmultivsliceinfo>0)glutAddMenuEntry("-",MENU_DUMMY);
+    }
       }
     }
-    if(nvsliceinfo>0)glutAddMenuEntry("-",MENU_DUMMY);
-    if(showallslicevectors==0)glutAddMenuEntry(_("Show all vector slice menu entries"), MENU_LOADVSLICE_SHOWALL);
-    if(showallslicevectors==1)glutAddMenuEntry(_("*Show all vector slice menu entries"), MENU_LOADVSLICE_SHOWALL);
+    if(nmultivsliceinfo>0&&nmultivsliceinfo<nvsliceinfo){
+      char loadmenulabel[100];
+      char steplabel[100];
+
+      strcpy(loadmenulabel, "Mesh");
+      if(sliceframestep>1){
+        sprintf(steplabel, "/Skip %i", sliceframeskip);
+        strcat(loadmenulabel, steplabel);
+      }
+      GLUTADDSUBMENU(loadmenulabel, vsliceloadmenu);
+    }
+    if(nslicedups > 0){
+      GLUTADDSUBMENU(_("Duplicate vector slices"), duplicatevectorslicemenu);
+    }
+    glutAddMenuEntry(_("Settings..."), MENU_LOADVSLICE_SETTINGS);
     if(nvsliceloaded>1){
-      glutAddSubMenu(_("Unload"),unloadvslicemenu);
+      GLUTADDSUBMENU(_("Unload"),unloadvslicemenu);
     }
     else{
      glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
     }
   }
 
+// setup boundary slices for slice files
+
+    {
+      int ii;
+
+      // count patch submenus
+
+      have_geom_slice_menus=0;
+      nloadsubpatchmenu_s = 0;
+      for(ii = 0;ii<npatchinfo;ii++){
+        int im1;
+        patchdata *patchi, *patchim1;
+
+        i = patchorderindex[ii];
+        if(ii>0){
+          im1 = patchorderindex[ii-1];
+          patchim1 = patchinfo+im1;
+        }
+        patchi = patchinfo+i;
+        if(ii==0||strcmp(patchi->menulabel_base, patchim1->menulabel_base)!=0){
+          nloadsubpatchmenu_s++;
+        }
+      }
+
+      // create patch submenus
+
+      if(nloadsubpatchmenu_s > 0){
+        NewMemory((void **)&loadsubpatchmenu_s, nloadsubpatchmenu_s * sizeof(int));
+        NewMemory((void **)&nsubpatchmenus_s, nloadsubpatchmenu_s * sizeof(int));
+      }
+      for(i = 0;i<nloadsubpatchmenu_s;i++){
+        loadsubpatchmenu_s[i] = 0;
+        nsubpatchmenus_s[i] = 0;
+      }
+
+      iloadsubpatchmenu_s = 0;
+      for(ii = 0;ii<npatchinfo;ii++){
+        int im1;
+        patchdata *patchi, *patchim1;
+
+        i = patchorderindex[ii];
+        if(ii>0){
+          im1 = patchorderindex[ii-1];
+          patchim1 = patchinfo+im1;
+        }
+        patchi = patchinfo+i;
+        if(ii==0||strcmp(patchi->menulabel_base, patchim1->menulabel_base)!=0){
+          CREATEMENU(loadsubpatchmenu_s[iloadsubpatchmenu_s], LoadBoundaryMenu);
+          iloadsubpatchmenu_s++;
+        }
+        if(patchi->filetype_label==NULL||strcmp(patchi->filetype_label, "INCLUDE_GEOM")!=0)continue;
+        if(nsubpatchmenus_s[iloadsubpatchmenu_s - 1] == 0 ||
+          strcmp(patchi->menulabel_suffix, patchim1->menulabel_suffix) != 0){
+          nsubpatchmenus_s[iloadsubpatchmenu_s-1]++;
+          have_geom_slice_menus=1;
+          glutAddMenuEntry(patchi->menulabel_suffix, -i-10);
+        }
+      }
+    }
+
   /* --------------------------------unload and load slice menus -------------------------- */
 
-  if(nterraininfo>0){
-    int nterrainloaded=0;
+  if(nsliceinfo>0||have_geom_slice_menus==1){
+    CREATEMENU(unloadslicemenu,UnloadSliceMenu);
+    for(i=0;i<nsliceinfo;i++){
+      slicedata *sd;
+      char menulabel[1024];
 
-    CREATEMENU(unloadterrainmenu,UnloadTerrainMenu);
-    for(i=0;i<nterraininfo;i++){
-      terraindata *terri;
-
-      terri = terraininfo + i;
-      if(terri->loaded==1){
-        nterrainloaded++;
-        glutAddMenuEntry(terri->file,i);
+      sd = sliceinfo + sliceorderindex[i];
+      if(sd->loaded==1){
+        STRCPY(menulabel,sd->menulabel2);
+        glutAddMenuEntry(menulabel,sliceorderindex[i]);
       }
     }
-    if(nterrainloaded>1){
-        glutAddMenuEntry("-",MENU_UNLOADTERRAIN_DUMMY);
-        glutAddMenuEntry(_("Unload all"), MENU_UNLOADTERRAIN_UNLOADALL);
-    }
-    CREATEMENU(loadterrainmenu,LoadTerrainMenu);
-    if(nterraininfo>1){
-      glutAddMenuEntry(_("All terrains"), MENU_LOADTERRAIN_LOADALL);
-      glutAddMenuEntry("-",MENU_LOADTERRAIN_DUMMY);
-    }
-    /*
-    leaving code commented in case I later decide to load/unload terrain files
-    for(i=0;i<nterraininfo;i++){
-      char menulabel[256];
+    for(i = 0;i<npatchinfo;i++){
+      patchdata *patchi;
 
-      terraindata *terri;
+      patchi = patchinfo+i;
+      if(patchi->loaded==1&&patchi->filetype_label!=NULL&&strcmp(patchi->filetype_label, "INCLUDE_GEOM")==0){
+        glutAddMenuEntry(patchi->label.longlabel, -3-i);
+        geom_slice_loaded++;
+      }
+    }
 
-      terri = terraininfo + i;
-      strcpy(menulabel,"");
-      if(terri->loaded==1)strcat(menulabel,"*");
-      strcat(menulabel,terri->file);
-      glutAddMenuEntry(menulabel,i);
+    glutAddMenuEntry("-",MENU_DUMMY);
+    glutAddMenuEntry(_("Unload last"),UNLOAD_LAST);
+    glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
+
+//  count slice submenus
+
+    nloadsubslicemenu=1;
+    for(i=1;i<nsliceinfo;i++){
+      slicedata *sd,*sdim1;
+
+      sd = sliceinfo + sliceorderindex[i];
+      sdim1 = sliceinfo + sliceorderindex[i-1];
+      if(strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0)nloadsubslicemenu++;
     }
-    */
-    if(nterrainloaded==1){
-      glutAddMenuEntry("-",MENU_LOADTERRAIN_DUMMY);
-      glutAddMenuEntry(_("Unload terrain"), MENU_LOADTERRAIN_UNLOAD);
+
+// create slice submenus
+
+    if(nloadsubslicemenu>0)NewMemory((void **)&loadsubslicemenu,nloadsubslicemenu*sizeof(int));
+    for(i=0;i<nloadsubslicemenu;i++){
+      loadsubslicemenu[i]=0;
     }
-    else if(nterrainloaded>1){
-      glutAddMenuEntry("-",MENU_LOADTERRAIN_DUMMY);
-      glutAddSubMenu(_("Unload terrain"),unloadterrainmenu);
+    iloadsubslicemenu=0;
+    for(i=0;i<nsliceinfo;i++){
+      slicedata *sd,*sdim1,*sdip1;
+      char menulabel[1024];
+
+      if(i!=0){
+        sdim1 = sliceinfo + sliceorderindex[i-1];
+      }
+      sd = sliceinfo + sliceorderindex[i];
+      if(i!=nsliceinfo-1){
+        sdip1 = sliceinfo + sliceorderindex[i+1];
+      }
+      if(i==0||strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0){
+        CREATEMENU(loadsubslicemenu[iloadsubslicemenu],LoadSliceMenu);
+      }
+      STRCPY(menulabel,"");
+      if(sd->loaded==1){
+        STRCAT(menulabel,"*");
+      }
+      STRCAT(menulabel,sd->menulabel);
+      if(sd->slicelabel!=NULL){
+        STRCAT(menulabel," - ");
+        STRCAT(menulabel,sd->slicelabel);
+      }
+      if(sd->menu_show==1){
+        int doit;
+
+        doit=1;
+        if(sd->slice_filetype==SLICE_TERRAIN){
+          meshdata *meshslice;
+          terraindata *terri;
+
+          meshslice = meshinfo + sd->blocknumber;
+          terri = meshslice->terrain;
+          if(terri==NULL||terri->nvalues==0)doit = 0;
+        }
+        if(doit==1)glutAddMenuEntry(menulabel,sliceorderindex[i]);
+      }
+      if(i==nsliceinfo-1||strcmp(sd->label.longlabel,sdip1->label.longlabel)!=0){
+        subslice_menuindex[iloadsubslicemenu]=sliceorderindex[i];
+        if(sd->ndirxyz[1]+sd->ndirxyz[2]+sd->ndirxyz[3]>1){
+          glutAddMenuEntry("-",MENU_DUMMY);
+        }
+        if(sd->ndirxyz[1]>1){
+          glutAddMenuEntry(_A(_("Load all"), " x"),-1000-4*iloadsubslicemenu-1);
+        }
+        if(sd->ndirxyz[2]>1){
+          glutAddMenuEntry(_A(_("Load all"), " y"),-1000-4*iloadsubslicemenu-2);
+        }
+        if(sd->ndirxyz[3]>1){
+          glutAddMenuEntry(_A(_("Load all"), " z"),-1000-4*iloadsubslicemenu-3);
+        }
+        if(sd->ndirxyz[1]+sd->ndirxyz[2]+sd->ndirxyz[3]>1){
+          glutAddMenuEntry(_("Load all"),-1000-4*iloadsubslicemenu);
+        }
+      }
+      if(i!=nsliceinfo-1&&strcmp(sd->label.longlabel,sdip1->label.longlabel)!=0){
+        iloadsubslicemenu++;
+      }
+    }
+
+// call slice submenus from main slice menu
+
+    CREATEMENU(loadslicemenu,LoadSliceMenu);
+    iloadsubslicemenu=0;
+    for(i=0;i<nsliceinfo;i++){
+      slicedata *sd,*sdim1;
+
+      sd = sliceinfo + sliceorderindex[i];
+      if(i>0)sdim1 = sliceinfo + sliceorderindex[i-1];
+      if(i==0||strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0){
+        char mlabel[1024],mlabel2[1024];;
+
+        STRCPY(mlabel,sd->label.longlabel);
+        if((i==0&&sd->mesh_type>0)||(i>0&&sd->mesh_type!=sdim1->mesh_type)){
+        if(sd->menu_show==1){
+            sprintf(mlabel2,"*** Evac type %i meshdata ***",sd->mesh_type);
+            glutAddMenuEntry(mlabel2,MENU_DUMMY);
+          }
+        }
+        if(sd->menu_show==1)GLUTADDSUBMENU(mlabel,loadsubslicemenu[iloadsubslicemenu]);
+        iloadsubslicemenu++;
+      }
+    }
+// menus for boundary/slice geometry files
+    {
+      int ii;
+
+      iloadsubpatchmenu_s = 0;
+      for(ii = 0;ii<npatchinfo;ii++){
+        int im1;
+        patchdata *patchi, *patchim1;
+
+        i = patchorderindex[ii];
+        if(ii>0){
+          im1 = patchorderindex[ii-1];
+          patchim1 = patchinfo+im1;
+        }
+        patchi = patchinfo+i;
+        if(ii==0||strcmp(patchi->menulabel_base, patchim1->menulabel_base)!=0){
+          if(nsubpatchmenus_s[iloadsubpatchmenu_s]>0){
+            GLUTADDSUBMENU(patchi->menulabel_base, loadsubpatchmenu_s[iloadsubpatchmenu_s]);
+          }
+          iloadsubpatchmenu_s++;
+        }
+      }
+    }
+    glutAddMenuEntry("-", MENU_DUMMY);
+    glutAddMenuEntry(_("Settings..."), MENU_SLICE_SETTINGS);
+    if(nsliceloaded+geom_slice_loaded>1){
+      GLUTADDSUBMENU(_("Unload"),unloadslicemenu);
+    }
+    else{
+      glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
     }
   }
-    if(nsliceinfo>0){
 
-      if(nmultisliceinfo<nsliceinfo){
-        CREATEMENU(unloadmultislicemenu,UnloadMultiSliceMenu);
-        nmultisliceloaded=0;
-        for(i=0;i<nmultisliceinfo;i++){
-          multislicedata *mslicei;
+  /* --------------------------------unload and load multislice menus -------------------------- */
 
-          mslicei = multisliceinfo + i;
-          if(mslicei->loaded!=0){
-            glutAddMenuEntry(mslicei->menulabel2,i);
-          }
-        }
-        glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
+  if(nmultisliceinfo+nfedinfo<nsliceinfo||have_geom_slice_menus==1){
+    CREATEMENU(unloadmultislicemenu, UnloadMultiSliceMenu);
+    nmultisliceloaded = 0;
+    for(i = 0;i<nmultisliceinfo;i++){
+      multislicedata *mslicei;
 
-        nloadsubmslicemenu=1;
-        for(i=1;i<nmultisliceinfo;i++){
-          slicedata *sd, *sdim1;
+      mslicei = multisliceinfo+i;
+      if(mslicei->loaded!=0){
+        glutAddMenuEntry(mslicei->menulabel2, i);
+      }
+    }
+    for(i = 0;i<npatchinfo;i++){
+      patchdata *patchi;
 
-          sd = sliceinfo+(multisliceinfo + i)->islices[0];
-          sdim1 = sliceinfo+(multisliceinfo + i-1)->islices[0];
-          if(strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0)nloadsubmslicemenu++;
-        }
-        NewMemory((void **)&loadsubmslicemenu,nloadsubmslicemenu*sizeof(int));
-        for(i=0;i<nloadsubmslicemenu;i++){
-          loadsubmslicemenu[i]=0;
-        }
-        nloadsubmslicemenu=0;
-        for(i=0;i<nmultisliceinfo;i++){
-          slicedata *sd, *sdim1;
-          char menulabel[1024];
-          multislicedata *mslicei;
+      patchi = patchinfo+i;
+      if(patchi->loaded==1&&patchi->filetype_label!=NULL&&strcmp(patchi->filetype_label, "INCLUDE_GEOM")==0){
+        glutAddMenuEntry(patchi->label.longlabel, -3-i);
+      }
+    }
+    glutAddMenuEntry(_("Unload all"), UNLOAD_ALL);
 
-          sd = sliceinfo+(multisliceinfo + i)->islices[0];
-          if(i>0)sdim1 = sliceinfo+(multisliceinfo + i-1)->islices[0];
-          mslicei = multisliceinfo + i;
-          if(i==0||strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0){
-            CREATEMENU(loadsubmslicemenu[nloadsubmslicemenu],LoadMultiSliceMenu);
-            nloadsubmslicemenu++;
-          }
-          STRCPY(menulabel,"");
-          if(mslicei->loaded==1){
-            STRCAT(menulabel,"*");
-            nmultisliceloaded++;
-          }
-          else if(mslicei->loaded==-1){
-            STRCAT(menulabel,"#");
-            nmultisliceloaded++;
-          }
-          STRCAT(menulabel,mslicei->menulabel);
-          if(sd->slicelabel!=NULL){
-            STRCAT(menulabel," - ");
-            STRCAT(menulabel,sd->slicelabel);
-          }
-          glutAddMenuEntry(menulabel,i);
-        }
-        CREATEMENU(loadmultislicemenu,LoadMultiSliceMenu);
-        nloadsubmslicemenu=0;
-        for(i=0;i<nmultisliceinfo;i++){
-          slicedata *sd, *sdim1;
+    nloadsubmslicemenu = 1;
+    for(i = 1;i<nmultisliceinfo;i++){
+      slicedata *sd, *sdim1;
 
-          sd = sliceinfo+(multisliceinfo + i)->islices[0];
-          if(i>0)sdim1 = sliceinfo+(multisliceinfo + i-1)->islices[0];
+      sd = sliceinfo+(multisliceinfo+i)->islices[0];
+      sdim1 = sliceinfo+(multisliceinfo+i-1)->islices[0];
+      if(strcmp(sd->label.longlabel, sdim1->label.longlabel)!=0)nloadsubmslicemenu++;
+    }
+    NewMemory((void **)&loadsubmslicemenu, nloadsubmslicemenu*sizeof(int));
+    for(i = 0;i<nloadsubmslicemenu;i++){
+      loadsubmslicemenu[i] = 0;
+    }
+    nloadsubmslicemenu = 0;
+    for(i = 0;i<nmultisliceinfo;i++){
+      slicedata *sd, *sdim1, *sdip1;
+      char menulabel[1024];
+      multislicedata *mslicei,*msliceim1,*msliceip1;
 
-          if(i==0||strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0){
-            char mlabel[1024], mlabel2[1024];
+      if(i>0){
+        msliceim1 = multisliceinfo+i-1;
+        sdim1 = sliceinfo+msliceim1->islices[0];
+      }
+      mslicei = multisliceinfo+i;
+      sd = sliceinfo+mslicei->islices[0];
+      if(i<nmultisliceinfo-1){
+        msliceip1 = multisliceinfo+i+1;
+        sdip1 = sliceinfo+msliceip1->islices[0];
+      }
 
-            STRCPY(mlabel,sd->label.longlabel);
-            if((i==0&&sd->mesh_type>0)||(i>0&&sd->mesh_type!=sdim1->mesh_type)){
-              sprintf(mlabel2,"*** Evac type %i meshes ***",sd->mesh_type);
-              if(sd->slicetype==SLICE_CELL_CENTER){
-                flowlabels *label;
-
-                label = &sd->label;
-                if(STRCMP(label->shortlabel,"U-VEL")==0||STRCMP(label->shortlabel,"V-VEL")==0||STRCMP(label->shortlabel,"W-VEL")==0){
-                  continue;
-                }
-              }
-              glutAddMenuEntry(mlabel2,MENU_DUMMY);
-            }
-            if(sd->slicetype==SLICE_CELL_CENTER){
-              flowlabels *label;
-
-              label = &sd->label;
-              if(STRCMP(label->shortlabel,"U-VEL")==0||STRCMP(label->shortlabel,"V-VEL")==0||STRCMP(label->shortlabel,"W-VEL")==0){
-                continue;
-              }
-            }
-            glutAddSubMenu(mlabel,             loadsubmslicemenu[nloadsubmslicemenu]);
-            nloadsubmslicemenu++;
-          }
-        }
-        if(nmultisliceinfo>0)glutAddMenuEntry("-",MENU_DUMMY);
-        if(nslicedups > 0){
-          glutAddMenuEntry("Duplicate slices", MENU_DUMMY);
-          if(slicedup_option == SLICEDUP_KEEPALL){
-            glutAddMenuEntry("  *keep all", MENU_KEEP_ALL);
-          }
-          else{
-            glutAddMenuEntry("  keep all", MENU_KEEP_ALL);
-          }
-          if(slicedup_option == SLICEDUP_KEEPFINE){
-            glutAddMenuEntry("  *keep fine", MENU_KEEP_FINE);
-          }
-          else{
-            glutAddMenuEntry("  keep fine", MENU_KEEP_FINE);
-          }
-          if(slicedup_option == SLICEDUP_KEEPCOARSE){
-            glutAddMenuEntry("  *keep coarse", MENU_KEEP_COARSE);
-          }
-          else{
-            glutAddMenuEntry("  keep coarse", MENU_KEEP_COARSE);
-          }
+      if(i==0||strcmp(sd->label.longlabel, sdim1->label.longlabel)!=0){
+        msubslice_menuindex[nloadsubmslicemenu]=mslicei->islices[0];
+        CREATEMENU(loadsubmslicemenu[nloadsubmslicemenu], LoadMultiSliceMenu);
+        nloadsubmslicemenu++;
+      }
+      STRCPY(menulabel, "");
+      if(mslicei->loaded==1){
+        STRCAT(menulabel, "*");
+        nmultisliceloaded++;
+      }
+      else if(mslicei->loaded==-1){
+        STRCAT(menulabel, "#");
+        nmultisliceloaded++;
+      }
+      STRCAT(menulabel, mslicei->menulabel);
+      if(sd->slicelabel!=NULL){
+        STRCAT(menulabel, " - ");
+        STRCAT(menulabel, sd->slicelabel);
+      }
+      glutAddMenuEntry(menulabel, i);
+      if(i==nmultisliceinfo-1||strcmp(sd->label.longlabel, sdip1->label.longlabel)!=0){
+        if(mslicei->ndirxyz[1] + mslicei->ndirxyz[2] + mslicei->ndirxyz[3] > 1){
           glutAddMenuEntry("-", MENU_DUMMY);
         }
-        if(use_set_slicecolor==1){
-          glutAddMenuEntry("  *defer slice coloring", MENU_SLICECOLORDEFER);
+        if(mslicei->ndirxyz[1]>1){
+          glutAddMenuEntry(_A(_("Load all"), " x"),-1000-4*(nloadsubmslicemenu-1)-1);
         }
-        else{
-          glutAddMenuEntry("  defer slice coloring", MENU_SLICECOLORDEFER);
+        if(mslicei->ndirxyz[2]>1){
+          glutAddMenuEntry(_A(_("Load all"), " y"),-1000-4*(nloadsubmslicemenu-1)-2);
         }
-        if(nmultisliceloaded>1){
-          glutAddSubMenu(_("Unload"),unloadmultislicemenu);
+        if(mslicei->ndirxyz[3]>1){
+          glutAddMenuEntry(_A(_("Load all"), " z"),-1000-4*(nloadsubmslicemenu-1)-3);
         }
-        else{
-          glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
-        }
-
-      }
-      CREATEMENU(unloadslicemenu,UnloadSliceMenu);
-      for(i=0;i<nsliceinfo;i++){
-        slicedata *sd;
-        char menulabel[1024];
-
-        sd = sliceinfo + sliceorderindex[i];
-        if(sd->loaded==1){
-          STRCPY(menulabel,sd->menulabel2);
-          glutAddMenuEntry(menulabel,sliceorderindex[i]);
+        if(mslicei->ndirxyz[1]+mslicei->ndirxyz[2]+mslicei->ndirxyz[3]>1){
+          glutAddMenuEntry(_("Load all"),  -1000-4*(nloadsubmslicemenu-1));
         }
       }
-      glutAddMenuEntry("-",MENU_DUMMY);
-      glutAddMenuEntry(_("Unload last"),UNLOAD_LAST);
-      glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
-
-//  count number of subslice menus
-
-      nloadsubslicemenu=1;
-      for(i=1;i<nsliceinfo;i++){
-        slicedata *sd,*sdim1;
-
-        sd = sliceinfo + sliceorderindex[i];
-        sdim1 = sliceinfo + sliceorderindex[i-1];
-        if(strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0)nloadsubslicemenu++;
-      }
-
-// allocate and initialize subslicemenus
-
-      NewMemory((void **)&loadsubslicemenu,nloadsubslicemenu*sizeof(int));
-      for(i=0;i<nloadsubslicemenu;i++){
-        loadsubslicemenu[i]=0;
-      }
-      iloadsubslicemenu=0;
-      for(i=0;i<nsliceinfo;i++){
-        slicedata *sd,*sdim1,*sdip1;
-        char menulabel[1024];
-
-        if(i!=0){
-          sdim1 = sliceinfo + sliceorderindex[i-1];
-        }
-        sd = sliceinfo + sliceorderindex[i];
-        if(i!=nsliceinfo-1){
-          sdip1 = sliceinfo + sliceorderindex[i+1];
-        }
-        if(i==0||strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0){
-          CREATEMENU(loadsubslicemenu[iloadsubslicemenu],LoadSliceMenu);
-        }
-        STRCPY(menulabel,"");
-        if(sd->loaded==1){
-          STRCAT(menulabel,"*");
-        }
-        STRCAT(menulabel,sd->menulabel);
-        if(sd->slicelabel!=NULL){
-          STRCAT(menulabel," - ");
-          STRCAT(menulabel,sd->slicelabel);
-        }
-        if(sd->menu_show==1){
-          glutAddMenuEntry(menulabel,sliceorderindex[i]);
-        }
-        if(i==nsliceinfo-1||strcmp(sd->label.longlabel,sdip1->label.longlabel)!=0){
-          subslice_menuindex[iloadsubslicemenu]=sliceorderindex[i];
-          if(sd->ndirxyz[1]+sd->ndirxyz[2]+sd->ndirxyz[3]>1){
-            glutAddMenuEntry("-",MENU_DUMMY);
-          }
-          if(sd->ndirxyz[1]>1){
-            glutAddMenuEntry(_("Load All x"),-1000-4*iloadsubslicemenu-1);
-          }
-          if(sd->ndirxyz[2]>1){
-            glutAddMenuEntry(_("Load All y"),-1000-4*iloadsubslicemenu-2);
-          }
-          if(sd->ndirxyz[3]>1){
-            glutAddMenuEntry(_("Load All z"),-1000-4*iloadsubslicemenu-3);
-          }
-          if(sd->ndirxyz[1]+sd->ndirxyz[2]+sd->ndirxyz[3]>1){
-            glutAddMenuEntry(_("Load All"),-1000-4*iloadsubslicemenu);
-          }
-        }
-        if(i!=nsliceinfo-1&&strcmp(sd->label.longlabel,sdip1->label.longlabel)!=0){
-          iloadsubslicemenu++;
-        }
-      }
-      CREATEMENU(loadslicemenu,LoadSliceMenu);
-      iloadsubslicemenu=0;
-      for(i=0;i<nsliceinfo;i++){
-        slicedata *sd,*sdim1;
-
-        sd = sliceinfo + sliceorderindex[i];
-        if(i>0)sdim1 = sliceinfo + sliceorderindex[i-1];
-        if(i==0||strcmp(sd->label.longlabel,sdim1->label.longlabel)!=0){
-          char mlabel[1024],mlabel2[1024];;
-
-          STRCPY(mlabel,sd->label.longlabel);
-          if((i==0&&sd->mesh_type>0)||(i>0&&sd->mesh_type!=sdim1->mesh_type)){
-            if(sd->menu_show==1){
-              sprintf(mlabel2,"*** Evac type %i meshdata ***",sd->mesh_type);
-              glutAddMenuEntry(mlabel2,MENU_DUMMY);
-            }
-          }
-          if(sd->menu_show==1)glutAddSubMenu(mlabel,loadsubslicemenu[iloadsubslicemenu]);
-          iloadsubslicemenu++;
-        }
-      }
-      glutAddMenuEntry("-", MENU_DUMMY);
-      glutAddMenuEntry("Show slice", MENU_DUMMY);
-    if(show_slice_in_obst==ONLY_IN_GAS){
-      glutAddMenuEntry(_("  *gas"),  MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
     }
-    if(show_slice_in_obst==GAS_AND_SOLID){
-      glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  *gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
-    }
-    if(show_slice_in_obst==ONLY_IN_SOLID){
-      glutAddMenuEntry(_("  gas"), MENU_SHOWSLICE_IN_GAS);
-      glutAddMenuEntry(_("  *solid"), MENU_SHOWSLICE_IN_SOLID);
-      glutAddMenuEntry(_("  gas and solid"), MENU_SHOWSLICE_IN_GASANDSOLID);
-    }
-      glutAddMenuEntry("-",MENU_DUMMY);
-      if(nsliceloaded>1){
-        glutAddSubMenu(_("Unload"),unloadslicemenu);
+    if(nslicedups>0){
+      CREATEMENU(duplicateslicemenu,LoadMultiSliceMenu);
+      if(slicedup_option==SLICEDUP_KEEPALL){
+        glutAddMenuEntry(_("  *keep all"), MENU_KEEP_ALL);
       }
       else{
-        glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
+        glutAddMenuEntry(_("  keep all"), MENU_KEEP_ALL);
+      }
+      if(slicedup_option==SLICEDUP_KEEPFINE){
+        glutAddMenuEntry(_("  *keep fine"), MENU_KEEP_FINE);
+      }
+      else{
+        glutAddMenuEntry(_("  keep fine"), MENU_KEEP_FINE);
+      }
+      if(slicedup_option==SLICEDUP_KEEPCOARSE){
+        glutAddMenuEntry(_("  *keep coarse"), MENU_KEEP_COARSE);
+      }
+      else{
+        glutAddMenuEntry(_("  keep coarse"), MENU_KEEP_COARSE);
       }
     }
+    CREATEMENU(loadmultislicemenu, LoadMultiSliceMenu);
+    nloadsubmslicemenu = 0;
+    for(i = 0;i<nmultisliceinfo;i++){
+      slicedata *sd, *sdim1;
+
+      sd = sliceinfo+(multisliceinfo+i)->islices[0];
+      if(i>0)sdim1 = sliceinfo+(multisliceinfo+i-1)->islices[0];
+
+      if(i==0||strcmp(sd->label.longlabel, sdim1->label.longlabel)!=0){
+        char mlabel[1024], mlabel2[1024];
+
+        STRCPY(mlabel, sd->label.longlabel);
+        if((i==0&&sd->mesh_type>0)||(i>0&&sd->mesh_type!=sdim1->mesh_type)){
+          sprintf(mlabel2, "*** Evac type %i meshes ***", sd->mesh_type);
+          glutAddMenuEntry(mlabel2, MENU_DUMMY);
+        }
+        GLUTADDSUBMENU(mlabel, loadsubmslicemenu[nloadsubmslicemenu]);
+        nloadsubmslicemenu++;
+      }
+    }
+    if(nmeshes>0){
+      int ii;
+
+      iloadsubpatchmenu_s = 0;
+      for(ii = 0;ii<npatchinfo;ii++){
+        int im1;
+        patchdata *patchi, *patchim1;
+
+        i = patchorderindex[ii];
+        if(ii>0){
+          im1 = patchorderindex[ii-1];
+          patchim1 = patchinfo+im1;
+        }
+        patchi = patchinfo+i;
+        if(ii==0||strcmp(patchi->menulabel_base, patchim1->menulabel_base)!=0){
+          if(nsubpatchmenus_s[iloadsubpatchmenu_s]>0){
+            GLUTADDSUBMENU(patchi->menulabel_base, loadsubpatchmenu_s[iloadsubpatchmenu_s]);
+          }
+          iloadsubpatchmenu_s++;
+        }
+      }
+    }
+
+    if(nmultisliceinfo>0)glutAddMenuEntry("-", MENU_DUMMY);
+    if(compute_slice_file_sizes==1){
+      glutAddMenuEntry(_("  *compute size of slice files to be loaded"), MENU_SLICE_FILE_SIZES);
+    }
+    else{
+      glutAddMenuEntry(_("  compute size of slice files to be loaded"), MENU_SLICE_FILE_SIZES);
+    }
+    if(use_set_slicecolor==1){
+      glutAddMenuEntry(_("  *defer slice coloring"), MENU_SLICECOLORDEFER);
+    }
+    else{
+      glutAddMenuEntry(_("  defer slice coloring"), MENU_SLICECOLORDEFER);
+    }
+    if(nslicedups > 0){
+      GLUTADDSUBMENU(_("Duplicate slices"), duplicateslicemenu);
+    }
+    glutAddMenuEntry(_("Settings..."), MENU_SLICE_SETTINGS);
+    if(nsliceinfo>0&&nmultisliceinfo+nfedinfo<nsliceinfo){
+      char loadmenulabel[100];
+      char steplabel[100];
+
+      strcpy(loadmenulabel,"Mesh");
+      if(sliceframeskip>0){
+        sprintf(steplabel,"/Skip %i",sliceframeskip);
+        strcat(loadmenulabel,steplabel);
+      }
+      GLUTADDSUBMENU(loadmenulabel,loadslicemenu);
+    }
+    if(nmultisliceloaded+geom_slice_loaded>1){
+      GLUTADDSUBMENU(_("Unload"), unloadmultislicemenu);
+    }
+    else{
+      glutAddMenuEntry(_("Unload"), UNLOAD_ALL);
+    }
+
+  }
 
 /* --------------------------------unload and load 3d vol smoke menus -------------------------- */
 
+    if(nvolrenderinfo>0){
+      CREATEMENU(loadvolsmokesinglemenu, LoadVolsmoke3DMenu);
+      for(i=0;i<nmeshes;i++){
+        meshdata *meshi;
+        volrenderdata *vr;
+        char menulabel[1024];
+
+        meshi = meshinfo + i;
+        vr = &(meshi->volrenderinfo);
+        if(vr->fireslice==NULL||vr->smokeslice==NULL)continue;
+        strcpy(menulabel,"");
+        if(vr->loaded==1)strcat(menulabel,"*");
+        strcat(menulabel,meshi->label);
+        glutAddMenuEntry(menulabel,i);
+      }
+    }
     if(nvolsmoke3dloaded>0){
       CREATEMENU(unloadvolsmoke3dmenu,UnLoadVolsmoke3DMenu);
       if(nvolsmoke3dloaded>1){
         char vlabel[256];
 
-        strcpy(vlabel,_("3D smoke (volume rendered)"));
-        strcat(vlabel,_(" - All meshes"));
+        strcpy(vlabel,_("3D smoke (Volume rendered)"));
         glutAddMenuEntry(vlabel,UNLOAD_ALL);
       }
       for(i=0;i<nmeshes;i++){
@@ -8895,74 +10219,45 @@ updatemenu=0;
       }
     }
     if(nvolrenderinfo>0){
+      char vlabel[256];
       CREATEMENU(loadvolsmoke3dmenu,LoadVolsmoke3DMenu);
-      if(nvolrenderinfo>1){
-        char vlabel[256];
 
-        strcpy(vlabel,_("3D smoke (volume rendered)"));
-        strcat(vlabel,_(" - All meshes"));
-        glutAddMenuEntry(vlabel,LOAD_ALL);
-        glutAddMenuEntry("-",MENU_DUMMY);
-      }
-      for(i=0;i<nmeshes;i++){
-        meshdata *meshi;
-        volrenderdata *vr;
-        char menulabel[1024];
-
-        meshi = meshinfo + i;
-        vr = &(meshi->volrenderinfo);
-        if(vr->fireslice==NULL||vr->smokeslice==NULL)continue;
-        strcpy(menulabel,"");
-        if(vr->loaded==1)strcat(menulabel,"*");
-        strcat(menulabel,meshi->label);
-        glutAddMenuEntry(menulabel,i);
-      }
+      strcpy(vlabel,_("3D smoke (Volume rendered)"));
+      glutAddMenuEntry(vlabel,LOAD_ALL);
+      glutAddMenuEntry("-", MENU_DUMMY);
+      GLUTADDSUBMENU(_("Mesh"), loadvolsmokesinglemenu);
+      glutAddMenuEntry(_("Settings..."), MENU_VOLSMOKE_SETTINGS);
       if(nvolsmoke3dloaded==1)glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
-      if(nvolsmoke3dloaded>1)glutAddSubMenu(_("Unload"),unloadvolsmoke3dmenu);
+      if(nvolsmoke3dloaded>1)GLUTADDSUBMENU(_("Unload"),unloadvolsmoke3dmenu);
     }
 
     /* --------------------------------unload and load 3d smoke menus -------------------------- */
 
-    {
-      smoke3ddata *smoke3di;
       if(nsmoke3dloaded>0){
-        CREATEMENU(unloadsmoke3dmenu,UnLoadSmoke3DMenu);
-        {
-          int nsootloaded=0,nhrrloaded=0,nwaterloaded=0;
-
-          for(i=0;i<nsmoke3dinfo;i++){
-            smoke3di=smoke3dinfo + i;
-            if(smoke3di->loaded==0)continue;
-            switch(smoke3di->type){
-            case SOOT:
-              nsootloaded++;
-              break;
-            case FIRE:
-              nhrrloaded++;
-              break;
-            case WATER:
-              nwaterloaded++;
-              break;
-            default:
-              ASSERT(FFALSE);
-              break;
-            }
-          }
-          if(nsootloaded>1) glutAddMenuEntry(_("SOOT MASS FRACTION - all meshes"), MENU_UNLOADSMOKE3D_UNLOADALLSOOT);
-          if(nhrrloaded>1)  glutAddMenuEntry(_("HRRPUV - all meshes"), MENU_UNLOADSMOKE3D_UNLOADALLFIRE);
-          if(nwaterloaded>1)glutAddMenuEntry(_("water - all meshes"), MENU_UNLOADSMOKE3D_UNLOADALLWATER);
-          if(nsootloaded>1||nhrrloaded>1||nwaterloaded>1)glutAddMenuEntry("-",MENU_DUMMY);
-        }
+        CREATEMENU(unloadsmoke3dsinglemenu,UnLoadSmoke3DMenu);
         for(i=0;i<nsmoke3dinfo;i++){
+          smoke3ddata *smoke3di;
+          char smokemenulabel[256];
+
           smoke3di=smoke3dinfo+i;
           if(smoke3di->loaded==0)continue;
-          glutAddMenuEntry(smoke3di->menulabel,i);
+          strcpy(smokemenulabel, smoke3di->menulabel);
+          strcat(smokemenulabel, "- ");
+          strcat(smokemenulabel, smoke3di->label.longlabel);
+          glutAddMenuEntry(smokemenulabel,i);
         }
+        CREATEMENU(unloadsmoke3dmenu,UnLoadSmoke3DMenu);
+        if(nsootloaded>0)glutAddMenuEntry(_("SOOT DENSITY"), MENU_UNLOADSMOKE3D_UNLOADALLSOOT);
+        if(nhrrpuvloaded>0)glutAddMenuEntry(_("HRRPUV"), MENU_UNLOADSMOKE3D_UNLOADALLFIRE);
+        if(ntemploaded>0)glutAddMenuEntry(_("TEMPERATURE"), MENU_UNLOADSMOKE3D_UNLOADALLTEMP);
+        if(nco2loaded>0)glutAddMenuEntry(_("CARBON DIOXIDE DENSITY"), MENU_UNLOADSMOKE3D_UNLOADALLCO2);
+        if(nsootloaded+nhrrpuvloaded+ntemploaded+nco2loaded>0)glutAddMenuEntry("-", MENU_DUMMY);
+        GLUTADDSUBMENU(_("Mesh"), unloadsmoke3dsinglemenu);
       }
-    }
     {
       smoke3ddata *smoke3di;
-      int n_soot_menu=0, n_hrr_menu=0, n_water_menu=0;
+      int n_soot_menu=0, n_hrr_menu=0;
+      int n_temp_menu = 0, n_co2_menu = 0;
 
       if(nsmoke3dinfo>0){
         char menulabel[1024];
@@ -8970,6 +10265,9 @@ updatemenu=0;
         if(nmeshes==1){
           CREATEMENU(loadsmoke3dmenu,LoadSmoke3DMenu);
         }
+
+        // 3d smoke soot menu
+
         if(nmeshes>1){
           CREATEMENU(loadsmoke3dsootmenu,LoadSmoke3DMenu);
         }
@@ -8984,12 +10282,15 @@ updatemenu=0;
           strcat(menulabel,smoke3di->menulabel);
           glutAddMenuEntry(menulabel,i);
         }
+
+        // 3d smoke hrrpuv menu
+
         if(nmeshes>1){
           CREATEMENU(loadsmoke3dhrrmenu,LoadSmoke3DMenu);
         }
         for(i=0;i<nsmoke3dinfo;i++){
           smoke3di = smoke3dinfo + i;
-          if(smoke3di->type!=FIRE)continue;
+          if(smoke3di->type!=HRRPUV)continue;
           n_hrr_menu++;
           strcpy(menulabel,"");
           if(smoke3di->loaded==1){
@@ -8998,62 +10299,109 @@ updatemenu=0;
           strcat(menulabel,smoke3di->menulabel);
           glutAddMenuEntry(menulabel,i);
         }
-        if(nmeshes>1){
-          CREATEMENU(loadsmoke3dwatermenu,LoadSmoke3DMenu);
+
+        // 3d smoke temperature menu
+
+        if(nmeshes > 1){
+          CREATEMENU(loadsmoke3dtempmenu, LoadSmoke3DMenu);
         }
-        for(i=0;i<nsmoke3dinfo;i++){
+        for(i = 0;i < nsmoke3dinfo;i++){
           smoke3di = smoke3dinfo + i;
-          if(smoke3di->type!=WATER)continue;
-          n_water_menu++;
-          strcpy(menulabel,"");
-          if(smoke3di->loaded==1){
-            strcat(menulabel,"*");
+          if(smoke3di->type != TEMP)continue;
+          n_temp_menu++;
+          strcpy(menulabel, "");
+          if(smoke3di->loaded == 1){
+            strcat(menulabel, "*");
           }
-          strcat(menulabel,smoke3di->menulabel);
-          glutAddMenuEntry(menulabel,i);
+          strcat(menulabel, smoke3di->menulabel);
+          glutAddMenuEntry(menulabel, i);
+        }
+
+        // 3d smoke co2 menu
+
+        if(nmeshes > 1){
+          CREATEMENU(loadsmoke3dco2menu, LoadSmoke3DMenu);
+        }
+        for(i = 0;i < nsmoke3dinfo;i++){
+          smoke3di = smoke3dinfo + i;
+          if(smoke3di->type != CO2)continue;
+          n_co2_menu++;
+          strcpy(menulabel, "");
+          if(smoke3di->loaded == 1){
+            strcat(menulabel, "*");
+          }
+          strcat(menulabel, smoke3di->menulabel);
+          glutAddMenuEntry(menulabel, i);
         }
         if(nmeshes>1){
-          CREATEMENU(loadsmoke3dmenu,LoadSmoke3DMenu);
-        }
-        {
           int useitem;
           smoke3ddata *smoke3dj;
 
-          if(nmeshes>1){
-            for(i=0;i<nsmoke3dinfo;i++){
-              int j;
+          if(n_soot_menu>0||n_hrr_menu>0){
+            CREATEMENU(loadsmoke3dsinglemenu,LoadSmoke3DMenu);
+            if(n_soot_menu>0)GLUTADDSUBMENU(_("SOOT DENSITY"),loadsmoke3dsootmenu);
+            if(n_hrr_menu>0)GLUTADDSUBMENU(_("HRRPUV"),loadsmoke3dhrrmenu);
+            if(n_temp_menu > 0)GLUTADDSUBMENU(_("TEMPERATURE"), loadsmoke3dtempmenu);
+            if(n_co2_menu > 0)GLUTADDSUBMENU(_("CO2"), loadsmoke3dco2menu);
+          }
 
-              useitem=i;
-              smoke3di=smoke3dinfo + i;
-              for(j=0;j<i;j++){
-                smoke3dj = smoke3dinfo + j;
-                if(strcmp(smoke3di->label.longlabel,smoke3dj->label.longlabel)==0){
-                  useitem=-1;
-                  break;
-                }
-              }
-              if(useitem!=-1){
-                strcpy(menulabel,smoke3di->label.longlabel);
-                strcat(menulabel," - ");
-                strcat(menulabel,_("All meshes"));
-                glutAddMenuEntry(menulabel,-useitem-10);
+          CREATEMENU(loadsmoke3dmenu,LoadSmoke3DMenu);
+          {
+#ifdef pp_SMOKE_FAST
+            // comment out for now
+           // if(smoke3d_load_test==1)glutAddMenuEntry("*smoke3d load test", MENU_SMOKE3D_LOAD_TEST);
+           // if(smoke3d_load_test == 0)glutAddMenuEntry("smoke3d load test", MENU_SMOKE3D_LOAD_TEST);
+#endif
+          }
+          // multi mesh smoke menus items
+          for(i=0;i<nsmoke3dinfo;i++){
+            int j;
+
+            useitem=i;
+            smoke3di=smoke3dinfo + i;
+            for(j=0;j<i;j++){
+              smoke3dj = smoke3dinfo + j;
+              if(strcmp(smoke3di->label.longlabel,smoke3dj->label.longlabel)==0){
+                useitem=-1;
+                break;
               }
             }
-            glutAddMenuEntry("-",MENU_DUMMY3);
+            if(useitem!=-1){
+              strcpy(menulabel, "");
+              if(nsootloaded>0 && (
+                strcmp(smoke3di->label.longlabel, "SOOT MASS FRACTION") == 0 ||
+                strcmp(smoke3di->label.longlabel, "SOOT DENSITY") == 0)
+                ){
+                strcat(menulabel, "*");
+              }
+              if(nhrrpuvloaded>0&&strcmp(smoke3di->label.longlabel, "HRRPUV")==0)strcat(menulabel, "*");
+              if(ntemploaded>0 && strcmp(smoke3di->label.longlabel, "TEMPERATURE") == 0)strcat(menulabel, "*");
+              if(nco2loaded>0 && strcmp(smoke3di->label.longlabel, "CARBON DIOXIDE DENSITY") == 0)strcat(menulabel, "*");
+              strcat(menulabel,smoke3di->label.longlabel);
+              glutAddMenuEntry(menulabel,-useitem-100);
+            }
           }
-          if(nmeshes>1){
-            if(n_soot_menu>0)glutAddSubMenu(_("SOOT MASS FRACTION - single mesh"),loadsmoke3dsootmenu);
-            if(n_hrr_menu>0)glutAddSubMenu(_("HRRPUV - single mesh"),loadsmoke3dhrrmenu);
-            if(n_water_menu>0)glutAddSubMenu(_("Water - single mesh"),loadsmoke3dwatermenu);
+#ifdef pp_SMOKE_FAST
+          if(n_soot_menu>0&&n_hrr_menu>0){
+            glutAddMenuEntry("SOOT/HRRPUV(experimental loading)",MENU_SMOKE_SOOT_HRRPUV);
+          }
+#endif
+          if(n_soot_menu>0||n_hrr_menu>0){
+            glutAddMenuEntry("-", MENU_DUMMY3);
+            GLUTADDSUBMENU(_("Mesh"), loadsmoke3dsinglemenu);
           }
         }
-        if(use_iblank==0){
-          glutAddMenuEntry("-", MENU_DUMMY3);
-          glutAddMenuEntry(_("Initialize smoke blockage info"), MENU_SMOKE3D_IBLANK);
-          if(nsmoke3dloaded>=1)glutAddMenuEntry("-", MENU_DUMMY3);
+
+        glutAddMenuEntry("-", MENU_DUMMY3);
+        if(compute_smoke3d_file_sizes==1){
+          glutAddMenuEntry(_("*compute size of 3D smoke files to be loaded"), MENU_SMOKE_FILE_SIZES);
         }
+        else{
+          glutAddMenuEntry(_("compute size of 3D smoke files to be loaded"), MENU_SMOKE_FILE_SIZES);
+        }
+        glutAddMenuEntry(_("Settings..."), MENU_SMOKE_SETTINGS);
         if(nsmoke3dloaded==1)glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
-        if(nsmoke3dloaded>1)glutAddSubMenu(_("Unload"),unloadsmoke3dmenu);
+        if(nsmoke3dloaded>1)GLUTADDSUBMENU(_("Unload"),unloadsmoke3dmenu);
       }
     }
 
@@ -9065,6 +10413,7 @@ updatemenu=0;
       int ii;
 
       CREATEMENU(unloadplot3dmenu,UnloadPlot3dMenu);
+#ifndef pp_PLOT3D_REDUCEMENUS
       for(ii=0;ii<nplot3dinfo;ii++){
         i=plot3dorderindex[ii];
         plot3di = plot3dinfo + i;
@@ -9079,10 +10428,10 @@ updatemenu=0;
         STRCPY(menulabel,plot3dinfo[i].menulabel);
         glutAddMenuEntry(menulabel,i);
       }
-      glutAddMenuEntry("Unload all",UNLOAD_ALL);
+#endif
+      glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
 
-
-
+#ifndef pp_PLOT3D_REDUCEMENUS
       nloadsubplot3dmenu=1;
       for(ii=1;ii<nplot3dinfo;ii++){
         int im1;
@@ -9118,7 +10467,6 @@ updatemenu=0;
         plot3di = plot3dinfo + i;
         plot3dim1 = plot3dinfo + im1;
         if(ABS(plot3di->time-plot3dim1->time)>0.1){
-          if(nmeshes>1)glutAddMenuEntry("  All meshes",-100000+nloadsubplot3dmenu-1);
           CREATEMENU(loadsubplot3dmenu[nloadsubplot3dmenu],LoadPlot3dMenu);
           nloadsubplot3dmenu++;
         }
@@ -9129,7 +10477,45 @@ updatemenu=0;
         strcat(menulabel,plot3di->menulabel);
         glutAddMenuEntry(menulabel,i);
       }
-      if(nmeshes>1)glutAddMenuEntry(_("  All meshes"),-100000+nloadsubplot3dmenu-1);
+#endif
+
+      nloadsubplot3dmenu=0;
+#ifndef pp_PLOT3D_REDUCEMENUS
+      CREATEMENU(plot3dsinglemeshmenu,LoadPlot3dMenu);
+      for(ii=0;ii<nplot3dinfo;ii++){
+        int im1;
+
+        i = plot3dorderindex[ii];
+        plot3di = plot3dinfo + i;
+        if(ii==0){
+          sprintf(menulabel,"  %f",plot3di->time);
+          TrimZeros(menulabel);
+          strcat(menulabel," s");
+          if(nmeshes>1){
+            GLUTADDSUBMENU(menulabel,loadsubplot3dmenu[nloadsubplot3dmenu]);
+          }
+          nloadsubplot3dmenu++;
+        }
+        if(ii!=0){
+          i = plot3dorderindex[ii];
+          im1 = plot3dorderindex[ii-1];
+          plot3di = plot3dinfo + i;
+          plot3dim1 = plot3dinfo + im1;
+          if(strcmp(plot3di->longlabel,plot3dim1->longlabel)!=0){
+            glutAddMenuEntry(plot3di->longlabel,MENU_PLOT3D_DUMMY);
+          }
+          if(ABS(plot3di->time-plot3dim1->time)>0.1){
+            sprintf(menulabel,"  %f",plot3di->time);
+            TrimZeros(menulabel);
+            strcat(menulabel," s");
+            if(nmeshes>1){
+              GLUTADDSUBMENU(menulabel,loadsubplot3dmenu[nloadsubplot3dmenu]);
+            }
+            nloadsubplot3dmenu++;
+          }
+        }
+      }
+#endif
 
       nloadsubplot3dmenu=0;
       CREATEMENU(loadplot3dmenu,LoadPlot3dMenu);
@@ -9138,14 +10524,27 @@ updatemenu=0;
 
         i = plot3dorderindex[ii];
         plot3di = plot3dinfo + i;
+#ifndef pp_PLOT3D_REDUCEMENUS
+        if(ii==nplot3dinfo-1&&nmeshes>1){
+          GLUTADDSUBMENU(_("Mesh"),plot3dsinglemeshmenu);
+        }
+#endif
         if(ii==0){
+          glutAddMenuEntry(_("Settings..."), MENU_PLOT3D_SETTINGS);
+          if(nplot3dloaded>1){
+            GLUTADDSUBMENU(_("Unload"),unloadplot3dmenu);
+          }
+          else{
+            glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
+          }
+          glutAddMenuEntry("-", MENU_PLOT3D_DUMMY);
           strcpy(menulabel,plot3di->longlabel);
           glutAddMenuEntry(menulabel,MENU_PLOT3D_DUMMY);
           sprintf(menulabel,"  %f",plot3di->time);
           TrimZeros(menulabel);
           strcat(menulabel," s");
           if(nmeshes>1){
-            glutAddSubMenu(menulabel,loadsubplot3dmenu[nloadsubplot3dmenu]);
+            glutAddMenuEntry(menulabel,-100000+nloadsubplot3dmenu);
           }
           else{
             strcpy(menulabel,"  ");
@@ -9170,7 +10569,7 @@ updatemenu=0;
             TrimZeros(menulabel);
             strcat(menulabel," s");
             if(nmeshes>1){
-              glutAddSubMenu(menulabel,loadsubplot3dmenu[nloadsubplot3dmenu]);
+              glutAddMenuEntry(menulabel,-100000+nloadsubplot3dmenu);
             }
             else{
               strcpy(menulabel,"  ");
@@ -9184,30 +10583,30 @@ updatemenu=0;
           }
         }
       }
-      if(nplot3dloaded>1){
-        glutAddSubMenu(_("Unload"),unloadplot3dmenu);
-      }
-      else{
-       glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
-      }
     }
 
 /* --------------------------------load patch menu -------------------------- */
 
     if(npatchinfo>0){
       int ii;
+      int npatchloaded2=0;
 
       nloadpatchsubmenus=0;
-      CREATEMENU(unloadpatchmenu,UnloadPatchMenu);
+
+      CREATEMENU(unloadpatchmenu,UnloadBoundaryMenu);
       for(ii=0;ii<npatchinfo;ii++){
         patchdata *patchi;
         char menulabel[1024];
 
         i = patchorderindex[ii];
         patchi = patchinfo + i;
-        if(patchi->loaded==0)continue;
-        STRCPY(menulabel,patchi->menulabel);
-        glutAddMenuEntry(menulabel,i);
+        if(patchi->loaded==1){
+          if(patchi->filetype_label==NULL||strcmp(patchi->filetype_label, "INCLUDE_GEOM")!=0){
+            STRCPY(menulabel, patchi->menulabel);
+            glutAddMenuEntry(menulabel, i);
+            npatchloaded2++;
+          }
+        }
       }
       glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
 
@@ -9216,11 +10615,11 @@ updatemenu=0;
       }
 
       if(nmeshes>1){
-        CREATEMENU(loadpatchsubmenus[nloadpatchsubmenus],LoadPatchMenu);
+        CREATEMENU(loadpatchsubmenus[nloadpatchsubmenus],LoadBoundaryMenu);
         nloadpatchsubmenus++;
       }
       else{
-        CREATEMENU(loadpatchmenu,LoadPatchMenu);
+        CREATEMENU(loadpatchmenu,LoadBoundaryMenu);
       }
 
       for(ii=0;ii<npatchinfo;ii++){
@@ -9232,81 +10631,162 @@ updatemenu=0;
         if(ii>0){
           patchim1 = patchinfo + patchorderindex[ii-1];
           if(nmeshes>1&&strcmp(patchim1->label.longlabel,patchi->label.longlabel)!=0){
-            CREATEMENU(loadpatchsubmenus[nloadpatchsubmenus],LoadPatchMenu);
+            CREATEMENU(loadpatchsubmenus[nloadpatchsubmenus],LoadBoundaryMenu);
             nloadpatchsubmenus++;
           }
         }
 
-        if(patchi->loaded==1){
-          STRCPY(menulabel,"*");
+        if(patchi->filetype_label==NULL||strcmp(patchi->filetype_label,"INCLUDE_GEOM")!=0){
+          STRCPY(menulabel, "");
+          if(patchi->loaded==1)STRCAT(menulabel,"*");
           STRCAT(menulabel,patchi->menulabel);
+          glutAddMenuEntry(menulabel,i);
         }
-        else{
-          STRCPY(menulabel,patchi->menulabel);
-        }
-        glutAddMenuEntry(menulabel,i);
       }
 
       if(nmeshes>1){
-        CREATEMENU(loadpatchmenu,LoadPatchMenu);
-      }
+        char menulabel[1024];
 
-      {
-        int useitem;
-        patchdata *patchi, *patchj;
+        CREATEMENU(loadpatchsinglemenu, LoadBoundaryMenu);
+        for(ii=0;ii<npatchinfo;ii++){
+          patchdata *patch1, *patch2;
 
-        if(nmeshes>1){
-          char menulabel[1024];
-
-          for(i=0;i<npatchinfo;i++){
-            int j;
-
-            useitem=i;
-            patchi = patchinfo + i;
-            for(j=0;j<i;j++){
-              patchj = patchinfo + j;
-              if(strcmp(patchi->label.longlabel,patchj->label.longlabel)==0){
-                useitem=-1;
-                break;
-              }
-            }
-            if(useitem!=-1){
-              strcpy(menulabel,patchi->label.longlabel);
-              strcat(menulabel," - ");
-              strcat(menulabel,_("All meshes"));
-              glutAddMenuEntry(menulabel,-useitem-10);
-            }
+          i = patchorderindex[ii];
+          patch2 = patchinfo + i;
+          if(ii==0){
+            nloadpatchsubmenus=0;
+            strcpy(menulabel,patch2->label.longlabel);
+            GLUTADDSUBMENU(menulabel,loadpatchsubmenus[nloadpatchsubmenus]);
+            nloadpatchsubmenus++;
           }
-          glutAddMenuEntry("-",MENU_DUMMY3);
-          for(ii=0;ii<npatchinfo;ii++){
-            patchdata *patch1, *patch2;
-
-            i = patchorderindex[ii];
-            patch2 = patchinfo + i;
-            if(ii==0){
-              nloadpatchsubmenus=0;
+          else{
+            patch1 = patchinfo + patchorderindex[ii-1];
+            if(strcmp(patch1->label.longlabel,patch2->label.longlabel)!=0){
               strcpy(menulabel,patch2->label.longlabel);
-              strcat(menulabel," - ");
-              strcat(menulabel,_("Single mesh"));
-              glutAddSubMenu(menulabel,loadpatchsubmenus[nloadpatchsubmenus]);
+              GLUTADDSUBMENU(menulabel,loadpatchsubmenus[nloadpatchsubmenus]);
               nloadpatchsubmenus++;
-            }
-            else{
-              patch1 = patchinfo + patchorderindex[ii-1];
-              if(strcmp(patch1->label.longlabel,patch2->label.longlabel)!=0){
-                strcpy(menulabel,patch2->label.longlabel);
-                strcat(menulabel," - Single mesh");
-                glutAddSubMenu(menulabel,loadpatchsubmenus[nloadpatchsubmenus]);
-                nloadpatchsubmenus++;
-              }
             }
           }
         }
       }
+
+      if(nboundaryslicedups>0){
+        CREATEMENU(duplicateboundaryslicemenu,LoadBoundaryMenu);
+        if(boundaryslicedup_option == SLICEDUP_KEEPALL){
+          glutAddMenuEntry(_("  *keep all"), MENU_KEEP_ALL);
+        }
+        else{
+          glutAddMenuEntry(_("  keep all"), MENU_KEEP_ALL);
+        }
+        if(boundaryslicedup_option == SLICEDUP_KEEPFINE){
+          glutAddMenuEntry(_("  *keep fine"), MENU_KEEP_FINE);
+        }
+        else{
+          glutAddMenuEntry(_("  keep fine"), MENU_KEEP_FINE);
+        }
+        if(boundaryslicedup_option == SLICEDUP_KEEPCOARSE){
+          glutAddMenuEntry(_("  *keep coarse"), MENU_KEEP_COARSE);
+        }
+        else{
+          glutAddMenuEntry(_("  keep coarse"), MENU_KEEP_COARSE);
+        }
+      }
+      if(nmeshes>1){
+
+// count patch submenus
+
+        nloadsubpatchmenu_b=0;
+        for(ii=0;ii<npatchinfo;ii++){
+          int im1;
+          patchdata *patchi, *patchim1;
+
+          i = patchorderindex[ii];
+          if(ii>0){
+            im1 = patchorderindex[ii-1];
+            patchim1=patchinfo + im1;
+          }
+          patchi = patchinfo + i;
+          if(ii==0||strcmp(patchi->menulabel_base,patchim1->menulabel_base)!=0){
+            nloadsubpatchmenu_b++;
+          }
+        }
+
+// create patch submenus
+
+        if(nloadsubpatchmenu_b > 0){
+          NewMemory((void **)&loadsubpatchmenu_b, nloadsubpatchmenu_b * sizeof(int));
+          NewMemory((void **)&nsubpatchmenus_b, nloadsubpatchmenu_b * sizeof(int));
+        }
+        for(i=0;i<nloadsubpatchmenu_b;i++){
+          loadsubpatchmenu_b[i]=0;
+          nsubpatchmenus_b[i]=0;
+        }
+
+        iloadsubpatchmenu_b=0;
+        for(ii=0;ii<npatchinfo;ii++){
+          int im1;
+          patchdata *patchi, *patchim1;
+
+          i = patchorderindex[ii];
+          if(ii>0){
+            im1 = patchorderindex[ii-1];
+            patchim1=patchinfo + im1;
+          }
+          patchi = patchinfo + i;
+          if(ii==0||strcmp(patchi->menulabel_base,patchim1->menulabel_base)!=0){
+            CREATEMENU(loadsubpatchmenu_b[iloadsubpatchmenu_b],LoadBoundaryMenu);
+            iloadsubpatchmenu_b++;
+          }
+          if(ii==0||strcmp(patchi->menulabel_suffix,patchim1->menulabel_suffix)!=0){
+            if(patchi->filetype_label==NULL||strcmp(patchi->filetype_label,"INCLUDE_GEOM")!=0){
+              nsubpatchmenus_b[iloadsubpatchmenu_b-1]++;
+              glutAddMenuEntry(patchi->menulabel_suffix,-i-10);
+            }
+          }
+        }
+
+// call patch submenus from main patch menu
+
+        CREATEMENU(loadpatchmenu,LoadBoundaryMenu);
+        iloadsubpatchmenu_b=0;
+        for(ii=0;ii<npatchinfo;ii++){
+          int im1;
+          patchdata *patchi, *patchim1;
+
+          i = patchorderindex[ii];
+          if(ii>0){
+            im1 = patchorderindex[ii-1];
+            patchim1=patchinfo + im1;
+          }
+          patchi = patchinfo + i;
+          if(ii==0||strcmp(patchi->menulabel_base,patchim1->menulabel_base)!=0){
+            int nsubmenus;
+
+            nsubmenus = nsubpatchmenus_b[iloadsubpatchmenu_b];
+            if(nsubmenus>1){
+              GLUTADDSUBMENU(patchi->menulabel_base,loadsubpatchmenu_b[iloadsubpatchmenu_b]);
+            }
+            else if(nsubmenus==1){
+              glutAddMenuEntry(patchi->label.longlabel,-i-10);
+            }
+            iloadsubpatchmenu_b++;
+          }
+        }
+      }
+
       glutAddMenuEntry("-",MENU_DUMMY3);
+      if(nmeshes>1){
+        if(show_bndf_mesh_interface==1)glutAddMenuEntry("*show on mesh interface", MENU_BNDF_SHOW_MESH_INTERFACE);
+        if(show_bndf_mesh_interface==0)glutAddMenuEntry("show on mesh interface",  MENU_BNDF_SHOW_MESH_INTERFACE);
+      }
       glutAddMenuEntry(_("Update bounds"),MENU_UPDATEBOUNDS);
-      if(npatchloaded>1){
-        glutAddSubMenu(_("Unload"),unloadpatchmenu);
+      if(nboundaryslicedups>0){
+        GLUTADDSUBMENU(_("Duplicate boundary slices"),duplicateboundaryslicemenu);
+      }
+      if(nmeshes>1)GLUTADDSUBMENU(_("Mesh"), loadpatchsinglemenu);
+      glutAddMenuEntry(_("Settings..."), MENU_BOUNDARY_SETTINGS);
+      if(npatchloaded2>1){
+        GLUTADDSUBMENU(_("Unload"),unloadpatchmenu);
       }
       else{
        glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
@@ -9329,7 +10809,7 @@ updatemenu=0;
         STRCPY(menulabel,isoi->menulabel);
         glutAddMenuEntry(menulabel,i);
       }
-      glutAddMenuEntry("Unload all",UNLOAD_ALL);
+      glutAddMenuEntry(_("Unload all"),UNLOAD_ALL);
 
       if(nisoinfo>0){
         if(isosubmenus==NULL){
@@ -9372,7 +10852,29 @@ updatemenu=0;
         isodata *isoi, *isoj;
 
         if(nmeshes>1){
-         CREATEMENU(loadisomenu,LoadIsoMenu);
+          CREATEMENU(isosinglemeshmenu,LoadIsoMenu);
+          for(ii=0;ii<nisoinfo;ii++){
+            isodata *iso1, *iso2;
+            char menulabel[1024];
+
+            i = isoorderindex[ii];
+            iso1 = isoinfo + i;
+            if(ii==0){
+              nisosubmenus=0;
+              strcpy(menulabel,iso1->surface_label.longlabel);
+              GLUTADDSUBMENU(menulabel,isosubmenus[nisosubmenus]);
+              nisosubmenus++;
+            }
+            else{
+              iso2 = isoinfo + isoorderindex[ii-1];
+              if(strcmp(iso1->surface_label.longlabel,iso2->surface_label.longlabel)!=0){
+                strcpy(menulabel,iso1->surface_label.longlabel);
+                GLUTADDSUBMENU(menulabel,isosubmenus[nisosubmenus]);
+                nisosubmenus++;
+              }
+            }
+          }
+          CREATEMENU(loadisomenu,LoadIsoMenu);
           for(i=0;i<nisoinfo;i++){
             int j;
 
@@ -9389,42 +10891,16 @@ updatemenu=0;
               char menulabel[1024];
 
               strcpy(menulabel,isoi->surface_label.longlabel);
-              strcat(menulabel," - ");
-              strcat(menulabel,_("All meshes"));
               glutAddMenuEntry(menulabel,-useitem-10);
             }
           }
-          glutAddMenuEntry("-",MENU_DUMMY3);
-
-          for(ii=0;ii<nisoinfo;ii++){
-            isodata *iso1, *iso2;
-            char menulabel[1024];
-
-            i = isoorderindex[ii];
-            iso1 = isoinfo + i;
-            if(ii==0){
-              nisosubmenus=0;
-              strcpy(menulabel,iso1->surface_label.longlabel);
-              strcat(menulabel," - Single mesh");
-              glutAddSubMenu(menulabel,isosubmenus[nisosubmenus]);
-              nisosubmenus++;
-            }
-            else{
-              iso2 = isoinfo + isoorderindex[ii-1];
-              if(strcmp(iso1->surface_label.longlabel,iso2->surface_label.longlabel)!=0){
-                strcpy(menulabel,iso1->surface_label.longlabel);
-                strcat(menulabel," - Single mesh");
-                glutAddSubMenu(menulabel,isosubmenus[nisosubmenus]);
-                nisosubmenus++;
-              }
-            }
-          }
-
-       }
-     }
-
+          glutAddMenuEntry("-", MENU_DUMMY3);
+          GLUTADDSUBMENU(_("Mesh"), isosinglemeshmenu);
+        }
+      }
+      glutAddMenuEntry(_("Settings..."), MENU_ISO_SETTINGS);
       if(nisoloaded>1){
-        glutAddSubMenu(_("Unload"),unloadisomenu);
+        GLUTADDSUBMENU(_("Unload"),unloadisomenu);
       }
       else{
        glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
@@ -9441,11 +10917,9 @@ updatemenu=0;
         int n;
 
         zonei = zoneinfo + i;
-        if(zonefilenum==i){
-          STRCPY(menulabel,"*");
-          STRCAT(menulabel,zonei->file);
-        }
-        else{STRCPY(menulabel,zonei->file);}
+        STRCPY(menulabel, "");
+        if(zonei->loaded==1)STRCAT(menulabel,"*");
+        STRCAT(menulabel,zonei->file);
         STRCAT(menulabel,", ");
         for(n=0;n<3;n++){
           STRCAT(menulabel,zonei->label[n].shortlabel);
@@ -9454,9 +10928,9 @@ updatemenu=0;
         STRCAT(menulabel,zonei->label[3].shortlabel);
         glutAddMenuEntry(menulabel,i);
       }
-      glutAddMenuEntry("Unload",UNLOAD_ALL);
-
+      glutAddMenuEntry(_("Unload"),UNLOAD_ALL);
     }
+
 /* -------------------------------- compress menu -------------------------- */
 
 #ifdef pp_COMPRESS
@@ -9478,6 +10952,7 @@ updatemenu=0;
     glutAddMenuEntry("-",MENU_DUMMY);  // -c
     glutAddMenuEntry(_("Compress now"),MENU_COMPRESSNOW);
     glutAddMenuEntry(_("Erase compressed files"),MENU_ERASECOMPRESS);  // -c
+    glutAddMenuEntry(_("Settings..."), MENU_COMPRESS_SETTINGS);
   }
 #endif
 
@@ -9524,7 +10999,7 @@ updatemenu=0;
         glutAddMenuEntry(_("Read ini files"),MENU_READINI);
       }
       else{
-        glutAddSubMenu(_("Read ini files"),inisubmenu);
+        GLUTADDSUBMENU(_("Read ini files"),inisubmenu);
       }
     }
   }
@@ -9545,16 +11020,28 @@ updatemenu=0;
       glutAddMenuEntry("-",MENU_DUMMY);
       glutAddMenuEntry(_("Read .svo files"),MENU_READSVO);
     }
+    glutAddMenuEntry(_("Settings..."), MENU_CONFIG_SETTINGS);
 
     CREATEMENU(reloadmenu,ReloadMenu);
-    glutAddMenuEntry(_("Reload now"),RELOAD_NOW);
-    if(periodic_value==1)glutAddMenuEntry(_("*Reload every 1 minute"),1);
-    if(periodic_value!=1)glutAddMenuEntry(_("Reload every 1 minute"),1);
-    if(periodic_value==5)glutAddMenuEntry(_("*Reload every 5 minutes"),5);
-    if(periodic_value!=5)glutAddMenuEntry(_("Reload every 5 minutes"),5);
-    if(periodic_value==10)glutAddMenuEntry(_("*Reload every 10 minutes"),10);
-    if(periodic_value!=10)glutAddMenuEntry(_("Reload every 10 minutes"),10);
-    glutAddMenuEntry(_("Stop Rendering"),STOP_RENDERING);
+    glutAddMenuEntry(_("smv"), RELOAD_SMV_FILE);
+    if(load_incremental==1){
+      glutAddMenuEntry(_("*New data"), RELOAD_MODE_INCREMENTAL);
+      glutAddMenuEntry(_("All data"), RELOAD_MODE_ALL);
+    }
+    if(load_incremental==0){
+      glutAddMenuEntry(_("New data"), RELOAD_MODE_INCREMENTAL);
+      glutAddMenuEntry(_("*All data"), RELOAD_MODE_ALL);
+    }
+    glutAddMenuEntry("-", MENU_DUMMY);
+    glutAddMenuEntry(_("When:"), MENU_DUMMY);
+    glutAddMenuEntry(_("  now"),RELOAD_SWITCH);
+    if(periodic_value==1)glutAddMenuEntry(_("   *every minute"),1);
+    if(periodic_value!=1)glutAddMenuEntry(_("   every minute"),1);
+    if(periodic_value==5)glutAddMenuEntry(_("   *every 5 minutes"),5);
+    if(periodic_value!=5)glutAddMenuEntry(_("   every 5 minutes"),5);
+    if(periodic_value==10)glutAddMenuEntry(_("   *every 10 minutes"),10);
+    if(periodic_value!=10)glutAddMenuEntry(_("   every 10 minutes"),10);
+    glutAddMenuEntry(_("Cancel"),STOP_RELOADING);
 
 
     {
@@ -9654,7 +11141,7 @@ updatemenu=0;
       }
       CREATEMENU(luascriptmenu,LuaScriptMenu);
       if(nluascripts>0){
-        glutAddSubMenu(_("Run"),luascriptlistmenu);
+        GLUTADDSUBMENU(_("Run"),luascriptlistmenu);
       }
     }
 #endif
@@ -9668,12 +11155,13 @@ updatemenu=0;
 
       CREATEMENU(scriptmenu,ScriptMenu);
       if(nscripts>0){
-        glutAddSubMenu(_("Run"),scriptlistmenu);
-        glutAddSubMenu(_("Step (using ^)"),scriptsteplistmenu);
+        GLUTADDSUBMENU(_("Run"),scriptlistmenu);
+        GLUTADDSUBMENU(_("Step (using ^)"),scriptsteplistmenu);
         if(script_step==1)glutAddMenuEntry(_("Continue"),SCRIPT_CONTINUE);
         if(script_step==1||current_script_command!=NULL)glutAddMenuEntry(_("Cancel"),SCRIPT_CANCEL);
       }
-      glutAddSubMenu(_("Record"),scriptrecordmenu);
+      GLUTADDSUBMENU(_("Record"),scriptrecordmenu);
+      glutAddMenuEntry(_("Settings..."), MENU_SCRIPT_SETTINGS);
     }
 
   /* --------------------------------loadunload menu -------------------------- */
@@ -9683,79 +11171,106 @@ updatemenu=0;
 
       CREATEMENU(loadunloadmenu,LoadUnloadMenu);
       strcpy(steplabel,_("error: steplabel not defined"));
+
+      // 3d smoke
+
       if(nsmoke3dinfo>0){
         strcpy(loadmenulabel,_("3D smoke"));
         if(smoke3dframeskip>0){
           sprintf(steplabel,"/Skip %i",smoke3dframeskip);
           strcat(loadmenulabel,steplabel);
         }
-        glutAddSubMenu(loadmenulabel,loadsmoke3dmenu);
+        GLUTADDSUBMENU(loadmenulabel,loadsmoke3dmenu);
       }
+
+      // volume rendered smoke
+
       if(nvolrenderinfo>0&&smokediff==0){
         char vlabel[256];
 
-        strcpy(vlabel,_("3D smoke (volume rendered)"));
-        glutAddSubMenu(vlabel,loadvolsmoke3dmenu);
+        strcpy(vlabel,_("3D smoke (Volume rendered)"));
+        GLUTADDSUBMENU(vlabel,loadvolsmoke3dmenu);
       }
+
+      // terrain
+
       if(manual_terrain==1&&nterraininfo>0){
-        glutAddSubMenu(_("Terrain"),loadterrainmenu);
+ //       GLUTADDSUBMENU(_("Terrain"),loadterrainmenu);
       }
-        if(nsliceinfo>0&&nmultisliceinfo<nsliceinfo){
-          strcpy(loadmenulabel,_("Multi-Slices"));
-          if(sliceframeskip>0){
-            sprintf(steplabel,"/Skip %i",sliceframeskip);
-            strcat(loadmenulabel,steplabel);
-          }
-          glutAddSubMenu(loadmenulabel,loadmultislicemenu);
+
+      // slice
+
+      if((nmultisliceinfo > 0 && nmultisliceinfo + nfedinfo < nsliceinfo)||have_geom_slice_menus==1){
+        strcpy(loadmenulabel, _("Slice"));
+        if(sliceframeskip > 0){
+          sprintf(steplabel, "/Skip %i", sliceframeskip);
+          strcat(loadmenulabel, steplabel);
         }
-        if(nvsliceinfo>0&&nmultivsliceinfo<nvsliceinfo){
-          strcpy(loadmenulabel,_("Multi-Vector Slices"));
-          if(sliceframeskip>0){
-            sprintf(steplabel,"/Skip %i",sliceframeskip);
-            strcat(loadmenulabel,steplabel);
-          }
-          glutAddSubMenu(loadmenulabel,loadmultivslicemenu);
+        GLUTADDSUBMENU(loadmenulabel, loadmultislicemenu);
+      }
+      else if(nsliceinfo > 0){
+        strcpy(loadmenulabel, "Slice");
+        if(sliceframeskip > 0){
+          sprintf(steplabel, "/Skip %i", sliceframeskip);
+          strcat(loadmenulabel, steplabel);
         }
-        if(nsliceinfo>0){
-          strcpy(loadmenulabel,"Slice file");
-          if(sliceframeskip>0){
-            sprintf(steplabel,"/Skip %i",sliceframeskip);
-            strcat(loadmenulabel,steplabel);
-          }
-          glutAddSubMenu(loadmenulabel,loadslicemenu);
+        GLUTADDSUBMENU(loadmenulabel, loadslicemenu);
+      }
+
+      // vector slice
+
+      if(nvsliceinfo > 0 && nmultivsliceinfo < nvsliceinfo){
+        strcpy(loadmenulabel,_("Vector Slice"));
+        if(sliceframeskip>0){
+          sprintf(steplabel,"/Skip %i",sliceframeskip);
+          strcat(loadmenulabel,steplabel);
         }
-        if(nvsliceinfo>0){
-          strcpy(loadmenulabel,_("Vector slices"));
-          if(sliceframestep>1){
-            sprintf(steplabel,"/Skip %i",sliceframeskip);
-            strcat(loadmenulabel,steplabel);
-          }
-          glutAddSubMenu(loadmenulabel,vslicemenu);
+        GLUTADDSUBMENU(loadmenulabel,loadmultivslicemenu);
+      }
+      else if(nvsliceinfo>0){
+        char loadmenulabel[100];
+        char steplabel[100];
+
+        strcpy(loadmenulabel,_("Vector slice"));
+        if(sliceframestep>1){
+          sprintf(steplabel,"/Skip %i",sliceframeskip);
+          strcat(loadmenulabel,steplabel);
         }
+        GLUTADDSUBMENU(loadmenulabel,vsliceloadmenu);
+      }
+
+      // isosurface
+
       if(nisoinfo>0){
-        strcpy(loadmenulabel,"Isosurface file");
+        strcpy(loadmenulabel,"Isosurface");
         if(isoframeskip_global>0){
           sprintf(steplabel,"/Skip %i",isoframeskip_global);
           strcat(loadmenulabel,steplabel);
         }
-        glutAddSubMenu(loadmenulabel,loadisomenu);
+        GLUTADDSUBMENU(loadmenulabel,loadisomenu);
       }
+
+      // boundary
+
       if(npatchinfo>0){
-        strcpy(loadmenulabel,"Boundary file");
+        strcpy(loadmenulabel,"Boundary");
         if(boundframeskip>0){
           sprintf(steplabel,"/Skip %i",boundframeskip);
           strcat(loadmenulabel,steplabel);
         }
-        glutAddSubMenu(loadmenulabel,loadpatchmenu);
+        GLUTADDSUBMENU(loadmenulabel,loadpatchmenu);
       }
+
+      // particle
+
       if(npartinfo>0){
         if(nevac!=npartinfo){
-          strcpy(loadmenulabel,"Particle file");
+          strcpy(loadmenulabel,"Particles");
           if(partframeskip>0){
             sprintf(steplabel,"/Skip Frame %i",partframeskip);
             strcat(loadmenulabel,steplabel);
           }
-          glutAddSubMenu(loadmenulabel,particlemenu);
+          GLUTADDSUBMENU(loadmenulabel,particlemenu);
         }
         if(nevac>0){
           strcpy(loadmenulabel,_("Evacuation"));
@@ -9763,30 +11278,35 @@ updatemenu=0;
             sprintf(steplabel,"/Skip Frame %i",partframeskip);
             strcat(loadmenulabel,steplabel);
           }
-          glutAddSubMenu(loadmenulabel,evacmenu);
+          GLUTADDSUBMENU(loadmenulabel,evacmenu);
         }
       }
-      if(nplot3dinfo>0)glutAddSubMenu("Plot3d file",loadplot3dmenu);
+
+      // plot3d
+
+      if(nplot3dinfo>0)GLUTADDSUBMENU(_("Plot3d"),loadplot3dmenu);
+
+      // zone fire
+
       if(nzoneinfo>0){
-        strcpy(loadmenulabel,"Zone fire file");
-        glutAddSubMenu(loadmenulabel,zonemenu);
+        strcpy(loadmenulabel,"Zone fire");
+        GLUTADDSUBMENU(loadmenulabel,zonemenu);
       }
       if(glui_active==1){
         glutAddMenuEntry("-",MENU_DUMMY);
       }
-      glutAddSubMenu(_("Configuration files"),smokeviewinimenu);
-      glutAddSubMenu(_("Scripts"),scriptmenu);
+      GLUTADDSUBMENU(_("Configuration files"),smokeviewinimenu);
+      GLUTADDSUBMENU(_("Scripts"),scriptmenu);
 #ifdef pp_LUA
-      glutAddSubMenu(_("Lua Scripts"),luascriptmenu);
+      GLUTADDSUBMENU("Lua Scripts",luascriptmenu);
 #endif
 #ifdef pp_COMPRESS
       if(smokezippath!=NULL&&(npatchinfo>0||nsmoke3dinfo>0||nsliceinfo>0)){
-        glutAddSubMenu(_("Compression"),compressmenu);
+        GLUTADDSUBMENU(_("Compression"),compressmenu);
       }
 #endif
       if(showfiles==1)glutAddMenuEntry(_("*Show file names"),SHOWFILES);
       if(showfiles==0)glutAddMenuEntry(_("Show file names"),SHOWFILES);
-
       {
         char menulabel[1024];
 
@@ -9797,11 +11317,11 @@ updatemenu=0;
         glutAddMenuEntry(menulabel,REDIRECT);
       }
 
-      glutAddSubMenu(_("Reload"),reloadmenu);
+      GLUTADDSUBMENU(_("Reload"),reloadmenu);
       glutAddMenuEntry(_("Unload all"),UNLOADALL);
     }
 
-/* --------------------------------main menu -------------------------- */
+    /* --------------------------------main menu -------------------------- */
     if(trainer_mode==1){
       CREATEMENU(trainerviewmenu,TrainerViewMenu);
       if(AnySmoke(NULL)==1){
@@ -9822,11 +11342,11 @@ updatemenu=0;
 
     CREATEMENU(mainmenu,MainMenu);
     if(trainer_mode==0){
-      glutAddSubMenu(_("Load/Unload"),loadunloadmenu);
-      glutAddSubMenu(_("Show/Hide"),showhidemenu);
-      glutAddSubMenu(_("Options"),optionmenu);
-      glutAddSubMenu(_("Dialogs"),dialogmenu);
-      glutAddSubMenu(_("Help"),helpmenu);
+      GLUTADDSUBMENU(_("Load/Unload"),loadunloadmenu);
+      GLUTADDSUBMENU(_("Show/Hide"),showhidemenu);
+      GLUTADDSUBMENU(_("Options"),optionmenu);
+      GLUTADDSUBMENU(_("Dialogs"),dialogmenu);
+      GLUTADDSUBMENU(_("Help"),helpmenu);
       glutAddMenuEntry(_("Quit"),MENU_MAIN_QUIT);
     }
     if(trainer_active==1){

@@ -6,20 +6,18 @@
 #include GLUT_H
 
 #include "update.h"
-#include "smv_endian.h"
 #include "smokeviewvars.h"
-#include "IOobject.h"
+#include "IOobjects.h"
 
 #define ijnode2(i,j) ((nxcell+1)*(j) + (i))
 #define ijnode3(i,j) ((nycell+1)*(i) + (j))
 #define FORTWUIREAD(var,size) FSEEK(WUIFILE,4,SEEK_CUR);\
                            returncode=fread(var,4,size,WUIFILE);\
-                           if(endianswitch==1)EndianSwitch(var,size);\
                            FSEEK(WUIFILE,4,SEEK_CUR)
 
-/* ------------------ drawnorth ------------------------ */
+/* ------------------ DrawNorth ------------------------ */
 
-void drawnorth(void){
+void DrawNorth(void){
   glPushMatrix();
   glTranslatef(northangle_position[0], northangle_position[1], northangle_position[2]);
   glRotatef(-northangle, 0.0, 0.0, 1.0);
@@ -40,12 +38,12 @@ typedef struct {
   float base_height;
 */
 
-/* ------------------ drawtrees ------------------------ */
+/* ------------------ DrawTrees ------------------------ */
 
-void drawtrees(void){
+void DrawTrees(void){
   int i;
 
- glEnable(GL_LIGHTING);
+ ENABLE_LIGHTING;
 
  glEnable(GL_COLOR_MATERIAL);
 
@@ -72,27 +70,27 @@ void drawtrees(void){
     switch(state){
       case 0:
         glColor4fv(trunccolor);
-        drawdisk(treei->trunk_diam,treei->base_height,trunccolor_uc);
+        DrawDisk(treei->trunk_diam,treei->base_height,trunccolor_uc);
 
         crown_height=treei->tree_height-treei->base_height;
         glTranslatef(0.0,0.0,treei->base_height);
         glColor4fv(treecolor);
-        drawcone(treei->base_diam,crown_height,treecolor_uc);
+        DrawCone(treei->base_diam,crown_height,treecolor_uc);
         break;
       case 1:
         glColor4fv(treecharcolor);
-        drawdisk(treei->trunk_diam,treei->base_height,trunccolor_uc);
+        DrawDisk(treei->trunk_diam,treei->base_height,trunccolor_uc);
 
         crown_height=treei->tree_height-treei->base_height;
         glTranslatef(0.0,0.0,treei->base_height);
-        drawcone(treei->base_diam,crown_height,treecolor_uc);
+        DrawCone(treei->base_diam,crown_height,treecolor_uc);
         break;
       case 2:
         glColor4fv(treecharcolor);
-        drawdisk(treei->trunk_diam,treei->base_height,trunccolor_uc);
+        DrawDisk(treei->trunk_diam,treei->base_height,trunccolor_uc);
         crown_height=treei->tree_height-treei->base_height;
         glTranslatef(0.0,0.0,treei->base_height);
-        drawcone(treei->trunk_diam,crown_height,trunccolor_uc);
+        DrawCone(treei->trunk_diam,crown_height,trunccolor_uc);
         break;
       default:
         ASSERT(FFALSE);
@@ -109,9 +107,9 @@ void drawtrees(void){
 
 }
 
-/* ------------------ get_zcell_val ------------------------ */
+/* ------------------ GetZCellVal ------------------------ */
 
-float get_zcell_val(meshdata *meshi,float xval, float yval, float *zval_offset, int *loc){
+float GetZCellVal(meshdata *meshi,float xval, float yval, float *zval_offset, int *loc){
   int imesh;
   int meshstart=-1;
 
@@ -149,7 +147,7 @@ float get_zcell_val(meshdata *meshi,float xval, float yval, float *zval_offset, 
       jval = (yval-yplt[0])/dy;
       if(jval>=jbar)jval=jbar-1;
       terri=meshj->terrain;
-      nxcell = terri->nx;
+      nxcell = terri->ibar;
       zcell = terri->zcell;
       zval = zcell[IJCELL2(ival,jval)];
       *loc=1;
@@ -164,9 +162,9 @@ float get_zcell_val(meshdata *meshi,float xval, float yval, float *zval_offset, 
   return 0.0;
 }
 
-/* ------------------ get_zcell_val_offset ------------------------ */
+/* ------------------ GetZCellValOffset ------------------------ */
 
-float get_zcell_val_offset(meshdata *meshi,float xval, float yval, int *loc){
+float GetZCellValOffset(meshdata *meshi,float xval, float yval, int *loc){
   int imesh;
   int meshstart=-1;
 
@@ -208,7 +206,7 @@ float get_zcell_val_offset(meshdata *meshi,float xval, float yval, int *loc){
       jval = (yval-yplt[0])/dy;
       if(jval>=jbar)jval=jbar-1;
       terri=meshj->terrain;
-      nxcell = terri->nx;
+      nxcell = terri->ibar;
       zcell = terri->zcell;
       zval = zcell[IJCELL2(ival,jval)];
       *loc=1;
@@ -224,9 +222,9 @@ float get_zcell_val_offset(meshdata *meshi,float xval, float yval, int *loc){
   return 0.0;
 }
 
-/* ------------------ update_terrain_colors ------------------------ */
+/* ------------------ UpdateTerrainColors ------------------------ */
 
-void update_terrain_colors(void){
+void UpdateTerrainColors(void){
   int i;
 
   for(i=0;i<MAXRGB;i++){
@@ -240,77 +238,108 @@ void update_terrain_colors(void){
   }
 }
 
-/* ------------------ terrain2geom ------------------------ */
+/* ------------------ GetZTerrain ------------------------ */
 
-void terrain2geom(float xmin, float xmax, float ymin, float ymax, int nx, int ny, float (*comp_func)(float, float)){
-  int i, j;
-  float dx, dy;
-  float x, y, z;
-  int nverts, nfaces;
-  float *verts;
-  int *faces;
-  int ivert, iface;
-
-  if(nx<2||ny<2)return;
-  dx = (xmax-xmin)/(nx-1);
-  dy = (ymax-ymin)/(ny-1);
-
-  nverts = nx*ny;
-  nfaces = 2*(nx-1)*(ny-1);
-
-  NewMemory((void **)&verts,3*nverts*sizeof(float));
-  NewMemory((void **)&faces,3*nfaces*sizeof(int));
-
-  ivert=0;
-  for(j=0;j<ny;j++){
-    y = ymin + j*dy;
-    for(i=0;i<nx;i++){
-      x = xmin + i*dx;
-      z = comp_func(x,y);
-      verts[ivert++]=x;
-      verts[ivert++]=y;
-      verts[ivert++]=z;
-    }
-  }
-#define IJgeom(i,j) (1+(i) + (j)*nx)
-
-  iface=0;
-  for(j=0;j<ny-1;j++){
-    for(i=0;i<nx-1;i++){
-      int i11, i12, i22, i21;
-
-      i11 = IJgeom(i,j);
-      i12 = IJgeom(i,j+1);
-      i22 = IJgeom(i+1,j+1);
-      i21 = IJgeom(i+1,j);
-      faces[iface++]=i11;
-      faces[iface++]=i21;
-      faces[iface++]=i22;
-      faces[iface++]=i11;
-      faces[iface++]=i22;
-      faces[iface++]=i12;
-    }
-  }
-  FORTgeomout(verts,&nverts,faces,&nfaces);
-  FREEMEMORY(verts);
-  FREEMEMORY(faces);
-}
-
-/* ------------------ get_z_terrain ------------------------ */
-
-float get_z_terrain(float x, float y){
+float GetZTerrain(float x, float y){
   int loc;
   float zterrain;
 
-  zterrain = get_zcell_val(NULL, x, y, NULL, &loc);
+  zterrain = GetZCellVal(NULL, x, y, NULL, &loc);
   return zterrain;
 }
 
-/* ------------------ initterrain_all ------------------------ */
+/* ------------------ ComputeTerrainNormalsManual ------------------------ */
 
-void initterrain_all(void){
+void ComputeTerrainNormalsManual(void){
   int imesh;
-  float zmin, zmax, dz;
+
+  for(imesh=0;imesh<nmeshes;imesh++){
+    meshdata *meshi;
+    terraindata *terri;
+    float *znode;
+    int j;
+    int nycell;
+
+    meshi = meshinfo + imesh;
+    terri = meshi->terrain;
+    if(terri==NULL)continue;
+    znode = terri->znode;
+    nycell = meshi->jbar;
+
+    for(j=0;j<=terri->jbar;j++){
+      int i;
+      float *yplt;
+
+      yplt = terri->yplt+j;
+      for(i=0;i<=terri->ibar;i++){
+        float dzdx, dzdy, sum, znormal3[3];
+        unsigned char *uc_znormal;
+        float *xplt;
+
+     //     i      j    k
+     //     1      0    dzdx
+     //     0      1    dzdy
+
+     //     -dzdx -dzdy 1
+
+        xplt = terri->xplt+i;
+        if(i==0){
+          dzdx = (znode[IJ2(i+1,j)]  -znode[IJ2(i,j)])/(xplt[1]-xplt[0]);
+        }
+        else if(i==terri->ibar){
+          dzdx = (znode[IJ2(i, j)]-znode[IJ2(i-1, j)])/(xplt[0]-terri->xplt[-1]);
+        }
+        else{
+          float dx1, dx3;
+          float dz1, dz3;
+
+          dx1 = (xplt[0]-xplt[-1]);
+          dx3 = (xplt[1]-xplt[0]);
+          dz1 = (znode[IJ2(i,j)]  -znode[IJ2(i-1,j)]);
+          dz3 = (znode[IJ2(i+1, j)]-znode[IJ2(i, j)]);
+          dzdx = ((dz1/dx1)*dx3+(dz3/dx3)*dx1)/(dx1+dx3);
+        }
+
+        if(j==0){
+          dzdy = (znode[IJ2(i, j+1)]-znode[IJ2(i, j)])/(yplt[1]-yplt[0]);
+        }
+        else if(j==terri->jbar){
+          dzdy = (znode[IJ2(i, j)]-znode[IJ2(i, j-1)])/(yplt[0]-yplt[-1]);
+        }
+        else{
+          float dy1, dy3;
+          float dz1, dz3;
+
+          dy1 = (yplt[0]-yplt[-1]);
+          dy3 = (yplt[1]-yplt[0]);
+          dz1 = (znode[IJ2(i, j)]-znode[IJ2(i, j-1)]);
+          dz3 = (znode[IJ2(i, j+1)]-znode[IJ2(i, j)]);
+          dzdy = ((dz1/dy1)*dy3+(dz3/dy3)*dy1)/(dy1+dy3);
+        }
+
+        uc_znormal = terri->uc_znormal + IJ2(i,j);
+        znormal3[0] = -dzdx;
+        znormal3[1] = -dzdy;
+        znormal3[2] = 1.0;
+
+        sum  = znormal3[0]*znormal3[0];
+        sum += znormal3[1]*znormal3[1];
+        sum += 1.0;
+        sum = sqrt(sum);
+        znormal3[0]/=sum;
+        znormal3[1]/=sum;
+        znormal3[2]/=sum;
+        *uc_znormal = GetNormalIndex(wui_sphereinfo, znormal3);
+      }
+    }
+  }
+}
+
+/* ------------------ ComputeTerrainNormalsAuto ------------------------ */
+
+void ComputeTerrainNormalsAuto(void){
+  int imesh;
+  float zmin, zmax;
 
   for(imesh=0;imesh<nmeshes;imesh++){
     meshdata *meshi;
@@ -325,21 +354,21 @@ void initterrain_all(void){
 
     terri = meshi->terrain;
 
-    dx = terri->x[1]-terri->x[0];
-    dy = terri->y[1]-terri->y[0];
+    dx = terri->xplt[1]-terri->xplt[0];
+    dy = terri->yplt[1]-terri->yplt[0];
 
     znode = terri->znode;
     znode_offset = terri->znode_offset;
-    nycell = terri->ny;
+    nycell = terri->jbar;
 
     uc_znormal = terri->uc_znormal;
-    for(j=0;j<=terri->ny;j++){
+    for(j=0;j<=terri->jbar;j++){
       int i;
       float ynode;
 
-      ynode = terri->y[j];
+      ynode = terri->yplt[j];
 
-      for(i=0;i<=terri->nx;i++){
+      for(i=0;i<=terri->ibar;i++){
         float xnode;
         int count, loc1, loc2, loc3, loc4;
         float val1, val2, val3, val4;
@@ -357,12 +386,12 @@ void initterrain_all(void){
         float znormal3[3];
         float denom;
 
-        xnode = terri->x[i];
+        xnode = terri->xplt[i];
 
-        val1 =  get_zcell_val(meshi,xnode-dx/2.0,ynode-dy/2.0,&val1_offset,&loc1);
-        val2 =  get_zcell_val(meshi,xnode+dx/2.0,ynode-dy/2.0,&val2_offset,&loc2);
-        val3 =  get_zcell_val(meshi,xnode+dx/2.0,ynode+dy/2.0,&val3_offset,&loc3);
-        val4 =  get_zcell_val(meshi,xnode-dx/2.0,ynode+dy/2.0,&val4_offset,&loc4);
+        val1 =  GetZCellVal(meshi,xnode-dx/2.0,ynode-dy/2.0,&val1_offset,&loc1);
+        val2 =  GetZCellVal(meshi,xnode+dx/2.0,ynode-dy/2.0,&val2_offset,&loc2);
+        val3 =  GetZCellVal(meshi,xnode+dx/2.0,ynode+dy/2.0,&val3_offset,&loc3);
+        val4 =  GetZCellVal(meshi,xnode-dx/2.0,ynode+dy/2.0,&val4_offset,&loc4);
         count = loc1 + loc2 + loc3 + loc4;
 
         zval = (val1*loc1 + val2*loc2 + val3*loc3 + val4*loc4)/(float)MAX(1,count);
@@ -374,10 +403,10 @@ void initterrain_all(void){
 
  // compute (f(x+dx,y) - f(x-dx,y))/(2*dx)
 
-        valx1a =  get_zcell_val(meshi,xnode-dx-dx/2.0,ynode-dy/2.0,NULL,&loc1);
-        valx2a =  get_zcell_val(meshi,xnode-dx+dx/2.0,ynode-dy/2.0,NULL,&loc2);
-        valx3a =  get_zcell_val(meshi,xnode-dx+dx/2.0,ynode+dy/2.0,NULL,&loc3);
-        valx4a =  get_zcell_val(meshi,xnode-dx-dx/2.0,ynode+dy/2.0,NULL,&loc4);
+        valx1a =  GetZCellVal(meshi,xnode-dx-dx/2.0,ynode-dy/2.0,NULL,&loc1);
+        valx2a =  GetZCellVal(meshi,xnode-dx+dx/2.0,ynode-dy/2.0,NULL,&loc2);
+        valx3a =  GetZCellVal(meshi,xnode-dx+dx/2.0,ynode+dy/2.0,NULL,&loc3);
+        valx4a =  GetZCellVal(meshi,xnode-dx-dx/2.0,ynode+dy/2.0,NULL,&loc4);
         count = loc1 + loc2 + loc3 + loc4;
         zvalxa = valx1a*loc1 + valx2a*loc2 + valx3a*loc3 + valx4a*loc4;
         if(count==0){
@@ -388,10 +417,10 @@ void initterrain_all(void){
           zvalxa /= (float)count;
           dxa = dx;
         }
-        valx1b =  get_zcell_val(meshi,xnode+dx-dx/2.0,ynode-dy/2.0,NULL,&loc1);
-        valx2b =  get_zcell_val(meshi,xnode+dx+dx/2.0,ynode-dy/2.0,NULL,&loc2);
-        valx3b =  get_zcell_val(meshi,xnode+dx+dx/2.0,ynode+dy/2.0,NULL,&loc3);
-        valx4b =  get_zcell_val(meshi,xnode+dx-dx/2.0,ynode+dy/2.0,NULL,&loc4);
+        valx1b =  GetZCellVal(meshi,xnode+dx-dx/2.0,ynode-dy/2.0,NULL,&loc1);
+        valx2b =  GetZCellVal(meshi,xnode+dx+dx/2.0,ynode-dy/2.0,NULL,&loc2);
+        valx3b =  GetZCellVal(meshi,xnode+dx+dx/2.0,ynode+dy/2.0,NULL,&loc3);
+        valx4b =  GetZCellVal(meshi,xnode+dx-dx/2.0,ynode+dy/2.0,NULL,&loc4);
         count = loc1 + loc2 + loc3 + loc4;
         zvalxb = valx1b*loc1 + valx2b*loc2 + valx3b*loc3 + valx4b*loc4;
         if(count==0){
@@ -412,10 +441,10 @@ void initterrain_all(void){
 
  // compute (f(x,y+dy) - f(x,y-dy))/(2*dy)
 
-        valy1a =  get_zcell_val(meshi,xnode-dx/2.0,ynode-dy-dy/2.0,NULL,&loc1);
-        valy2a =  get_zcell_val(meshi,xnode+dx/2.0,ynode-dy-dy/2.0,NULL,&loc2);
-        valy3a =  get_zcell_val(meshi,xnode+dx/2.0,ynode-dy+dy/2.0,NULL,&loc3);
-        valy4a =  get_zcell_val(meshi,xnode-dx/2.0,ynode-dy+dy/2.0,NULL,&loc4);
+        valy1a =  GetZCellVal(meshi,xnode-dx/2.0,ynode-dy-dy/2.0,NULL,&loc1);
+        valy2a =  GetZCellVal(meshi,xnode+dx/2.0,ynode-dy-dy/2.0,NULL,&loc2);
+        valy3a =  GetZCellVal(meshi,xnode+dx/2.0,ynode-dy+dy/2.0,NULL,&loc3);
+        valy4a =  GetZCellVal(meshi,xnode-dx/2.0,ynode-dy+dy/2.0,NULL,&loc4);
         count = loc1 + loc2 + loc3 + loc4;
         zvalya = valy1a*loc1 + valy2a*loc2 + valy3a*loc3 + valy4a*loc4;
         if(count==0){
@@ -426,10 +455,10 @@ void initterrain_all(void){
           zvalya /= (float)count;
           dya = dy;
         }
-        valy1b =  get_zcell_val(meshi,xnode-dx/2.0,ynode+dy-dy/2.0,NULL,&loc1);
-        valy2b =  get_zcell_val(meshi,xnode+dx/2.0,ynode+dy-dy/2.0,NULL,&loc2);
-        valy3b =  get_zcell_val(meshi,xnode+dx/2.0,ynode+dy+dy/2.0,NULL,&loc3);
-        valy4b =  get_zcell_val(meshi,xnode-dx/2.0,ynode+dy+dy/2.0,NULL,&loc4);
+        valy1b =  GetZCellVal(meshi,xnode-dx/2.0,ynode+dy-dy/2.0,NULL,&loc1);
+        valy2b =  GetZCellVal(meshi,xnode+dx/2.0,ynode+dy-dy/2.0,NULL,&loc2);
+        valy3b =  GetZCellVal(meshi,xnode+dx/2.0,ynode+dy+dy/2.0,NULL,&loc3);
+        valy4b =  GetZCellVal(meshi,xnode-dx/2.0,ynode+dy+dy/2.0,NULL,&loc4);
         count = loc1 + loc2 + loc3 + loc4;
         zvalyb = valy1b*loc1 + valy2b*loc2 + valy3b*loc3 + valy4b*loc4;
         if(count==0){
@@ -467,7 +496,7 @@ void initterrain_all(void){
         znormal3[0]/=sum;
         znormal3[1]/=sum;
         znormal3[2]/=sum;
-        *uc_znormal = getnormalindex(wui_sphereinfo, znormal3);
+        *uc_znormal = GetNormalIndex(wui_sphereinfo, znormal3);
       }
     }
   }
@@ -482,7 +511,7 @@ void initterrain_all(void){
     meshi = meshinfo + imesh;
     terri = meshi->terrain;
 
-    for(i=0;i<(terri->nx+1)*(terri->ny+1);i++){
+    for(i=0;i<(terri->ibar+1)*(terri->jbar+1);i++){
       float *znode;
 
       znode = terri->znode+i;
@@ -490,42 +519,11 @@ void initterrain_all(void){
       zmax = MAX(zmax,*znode);
     }
   }
-  dz = (zmax - zmin) / 10.0;
-  for(imesh=0;imesh<nmeshes;imesh++){
-    meshdata *meshi;
-    terraindata *terri;
-    int i;
-
-    meshi = meshinfo + imesh;
-    terri = meshi->terrain;
-    for(i=0;i<10;i++){
-      terri->levels[i]=zmin + i*dz;
-    }
-    terri->levels[10]=zmax;
-
-    FreeContour(&meshi->terrain_contour);
-    InitContour(&meshi->terrain_contour,rgbptr,nrgb);
-
-    meshi->terrain_contour.idir=3;
-    meshi->terrain_contour.xyzval=zmin;
-
-    GetContours(meshi->xplt_orig,meshi->yplt_orig,terri->nx+1,terri->ny+1,
-      terri->znode, NULL, terri->levels,DONT_GET_AREAS,DATA_FORTRAN,
-      &meshi->terrain_contour);
-  }
-  {
-    int nx, ny;
-
-    nx = (xbarORIG-xbar0ORIG)/(meshinfo[0].xplt_orig[1]-meshinfo[0].xplt_orig[0])+1;
-    ny = (ybarORIG-ybar0ORIG)/(meshinfo[0].yplt_orig[1]-meshinfo[0].yplt_orig[0])+1;
-
-    terrain2geom(xbar0ORIG, xbarORIG, ybar0ORIG, ybarORIG, nx, ny,get_z_terrain);
-  }
 }
 
-/* ------------------ initterrain_znode ------------------------ */
+/* ------------------ InitTerrainZNode ------------------------ */
 
-void initterrain_znode(meshdata *meshi, terraindata *terri, float xmin, float xmax, int nx, float ymin, float ymax, int ny,
+void InitTerrainZNode(meshdata *meshi, terraindata *terri, float xmin, float xmax, int nx, float ymin, float ymax, int ny,
                        int allocate_memory){
   float dx, dy;
   float *x, *y, *z;
@@ -537,46 +535,36 @@ void initterrain_znode(meshdata *meshi, terraindata *terri, float xmin, float xm
     meshi->terrain=terri;
   }
 
+  if(terri==NULL)return;
   if(allocate_memory==1){
-    terri->display=0;
-    terri->loaded=0;
-    terri->autoload=0;
-    terri->ntimes=0;
-    terri->x=NULL;
-    terri->y=NULL;
-    terri->times=NULL;
+    terri->xplt=NULL;
+    terri->yplt=NULL;
     terri->zcell=NULL;
     terri->znode=NULL;
     terri->uc_znormal=NULL;
-    terri->tcell=NULL;
     terri->ter_texture=NULL;
-    terri->state=NULL;
-    terri->timeslist=NULL;
   }
 
   terri->xmin=xmin;
   terri->xmax=xmax;
   terri->ymin=ymin;
   terri->ymax=ymax;
-  terri->ny=ny;
-  if(nx<0){
-    nx=-nx;
-  }
-  terri->nx=nx;
+  terri->jbar=ny;
+  nx=ABS(nx);
+  terri->ibar=nx;
 
   if(allocate_memory==1){
-    NewMemory((void **)&terri->x,(nx+1)*sizeof(float));
-    NewMemory((void **)&terri->y,(ny+1)*sizeof(float));
+    NewMemory((void **)&terri->xplt,(nx+1)*sizeof(float));
+    NewMemory((void **)&terri->yplt,(ny+1)*sizeof(float));
     NewMemory((void **)&terri->zcell,nx*ny*sizeof(float));
-    NewMemory((void **)&terri->state,nx*ny);
     NewMemory((void **)&terri->znode,(nx+1)*(ny+1)*sizeof(float));
     NewMemory((void **)&terri->znode_offset,(nx+1)*(ny+1)*sizeof(float));
     NewMemory((void **)&terri->znode_scaled,(nx+1)*(ny+1)*sizeof(float));
     NewMemory((void **)&terri->uc_znormal,(nx+1)*(ny+1)*sizeof(unsigned char));
   }
 
-  x = terri->x;
-  y = terri->y;
+  x = terri->xplt;
+  y = terri->yplt;
   dx = (xmax-xmin)/nx;
   dy = (ymax-ymin)/ny;
   for(i=0;i<nx;i++){
@@ -592,77 +580,36 @@ void initterrain_znode(meshdata *meshi, terraindata *terri, float xmin, float xm
   z=terri->zcell;
 
   nxcell = nx;
-  for(j=0;j<ny;j++){
-    for(i=0;i<nx;i++){
-      float zval;
+  if(meshi->zcell!=NULL){
+    for(j=0;j<ny;j++){
+      for(i=0;i<nx;i++){
+        float zval;
 
-      ij = IJCELL2(i,j);
-      zval=meshi->zcell[ij];
-      zterrain_min = MIN(zval,zterrain_min);
-      zterrain_max = MAX(zval,zterrain_max);
-      z[ij]=zval;
+        ij = IJCELL2(i,j);
+        zval=meshi->zcell[ij];
+        zterrain_min = MIN(zval,zterrain_min);
+        zterrain_max = MAX(zval,zterrain_max);
+        z[ij]=zval;
+      }
     }
   }
+  if(terri->file!=NULL)GetTerrainData(terri->file, terri);
 }
 
-/* ------------------ get_terraincolor ------------------------ */
+/* ------------------ DrawTerrain ------------------------ */
 
-float *get_terraincolor(terraincell *ti){
-  int index;
-  int i, ileft;
-  float sv_time;
-  float *ter_time;
-  float wuicolor[4] = {1.0,0.0,0.0,1.0};
-
-  if(ti == NULL)return GetColorPtr(wuicolor);
-
-  if(global_times == NULL || ti->time == NULL){
-    index = ti->state[0] % 10;
-    return rgb_terrain[index];
-  }
-
-  sv_time = global_times[itimes];
-  ter_time = ti->time;
-  ileft = ti->interval;
-
-  if(ter_time[ileft] <= sv_time&&sv_time < ter_time[ileft + 1]){
-    return rgb_terrain[ileft % 10];
-  }
-
-  for(i = ileft + 1;i < ti->nstates - 1;i++){
-    if(ter_time[i] <= sv_time&&sv_time < ter_time[i + 1]){
-      ti->interval = i;
-      return rgb_terrain[i % 10];
-    }
-  }
-  if(sv_time >= ter_time[ti->nstates - 1]){
-    ileft = ti->nstates - 1;
-    ti->interval = ileft;
-    return rgb_terrain[ileft % 10];
-  }
-  ileft = 0;
-  ti->interval = ileft;
-  return rgb_terrain[ileft % 10];
-}
-
-/* ------------------ drawterrain ------------------------ */
-
-void drawterrain(terraindata *terri, int only_geom){
+void DrawTerrain(terraindata *terri){
   float *znode, *zn;
   unsigned char *uc_znormal;
   int nycell;
   int i, j;
   float *x, *y;
-  terraincell *ti;
   float terrain_color[4];
   float terrain_shininess=100.0;
   float terrain_specular[4]={0.8,0.8,0.8,1.0};
-  //float zt_min, zt_max;
 
 #define ZOFFSET 0.001
 
-//xxx is_bottom is not defined correctly
-//    comment out following line to show all meshes
   if(terri->terrain_mesh->is_bottom==0)return;
 
   terrain_color[0]=0.47843;
@@ -674,7 +621,7 @@ void drawterrain(terraindata *terri, int only_geom){
   glScalef(SCALE2SMV(1.0),SCALE2SMV(1.0),SCALE2SMV(1.0));
   glTranslatef(-xbar0,-ybar0,-zbar0);
 
-  glEnable(GL_LIGHTING);
+  ENABLE_LIGHTING;
   glMaterialfv(GL_FRONT_AND_BACK,GL_SHININESS,&terrain_shininess);
   glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE,rgbterrain);
   glMaterialfv(GL_FRONT_AND_BACK,GL_SPECULAR,terrain_specular);
@@ -683,67 +630,111 @@ void drawterrain(terraindata *terri, int only_geom){
   glBegin(GL_QUADS);
   uc_znormal = terri->uc_znormal;
   znode = terri->znode;
-  nycell = terri->ny;
-  x = terri->x;
-  y = terri->y;
-  ti = terri->tcell;
+  nycell = terri->jbar;
+  x = terri->xplt;
+  y = terri->yplt;
   glColor4fv(terrain_color);
-  for(j=0;j<terri->ny;j++){
+  for(j=0;j<terri->jbar;j++){
     int jp1;
 
     jp1 = j + 1;
 
-    for(i=0;i<terri->nx;i++){
+    for(i=0;i<terri->ibar;i++){
       unsigned char *uc_zn;
       int ip1;
-      float *ter_rgbptr;
       float zval;
 
       ip1 = i + 1;
-      if(only_geom==0){
-        ter_rgbptr = get_terraincolor(ti);
-        glColor4fv(ter_rgbptr);
-      }
       uc_zn = uc_znormal+ijnode3(i,j);
-      zn = getnormalvectorptr(wui_sphereinfo, (unsigned int)(*uc_zn));
+      zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
 
       glNormal3fv(zn);
       zval = znode[ijnode3(i,j)]+ZOFFSET;
       glVertex3f(x[i],y[j],zval);
 
       uc_zn = uc_znormal+ijnode3(ip1,j);
-      zn = getnormalvectorptr(wui_sphereinfo, (unsigned int)(*uc_zn));
+      zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
       glNormal3fv(zn);
       zval = znode[ijnode3(ip1,j)]+ZOFFSET;
       glVertex3f(x[i+1],y[j],zval);
 
       uc_zn = uc_znormal+ijnode3(ip1,jp1);
-      zn = getnormalvectorptr(wui_sphereinfo, (unsigned int)(*uc_zn));
+      zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
       glNormal3fv(zn);
       zval = znode[ijnode3(ip1,jp1)]+ZOFFSET;
       glVertex3f(x[i+1],y[j+1],zval);
 
       uc_zn = uc_znormal+ijnode3(i,jp1);
-      zn = getnormalvectorptr(wui_sphereinfo, (unsigned int)(*uc_zn));
+      zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
       glNormal3fv(zn);
       zval = znode[ijnode3(i,jp1)]+ZOFFSET;
       glVertex3f(x[i],y[j+1],zval);
-
-      ti++;
     }
   }
   glEnd();
 
   glDisable(GL_COLOR_MATERIAL);
-  glDisable(GL_LIGHTING);
+  DISABLE_LIGHTING;
 
+  if(show_terrain_normals==1||show_terrain_grid==1){
+    glBegin(GL_LINES);
+    uc_znormal = terri->uc_znormal;
+    znode = terri->znode;
+    nycell = terri->jbar;
+    x = terri->xplt;
+    y = terri->yplt;
+    glColor3f(0.0, 0.0, 0.0);
+    if(show_terrain_grid==1){
+      for(j = 0; j<terri->jbar; j++){
+        for(i = 0; i<terri->ibar; i++){
+          float zval11, zval13, zval33, zval31;
+
+          zval11 = znode[ijnode3(i,     j)]+ZOFFSET;
+          zval31 = znode[ijnode3(i+1,   j)]+ZOFFSET;
+          zval33 = znode[ijnode3(i+1, j+1)]+ZOFFSET;
+          zval13 = znode[ijnode3(i,   j+1)]+ZOFFSET;
+
+          glVertex3f(x[i],   y[j],   zval11);
+          glVertex3f(x[i+1], y[j],   zval31);
+
+          glVertex3f(x[i+1], y[j],   zval31);
+          glVertex3f(x[i+1], y[j+1], zval33);
+
+          glVertex3f(x[i+1], y[j+1], zval33);
+          glVertex3f(x[i],   y[j+1], zval13);
+
+          glVertex3f(x[i],   y[j+1], zval13);
+          glVertex3f(x[i],   y[j],   zval11);
+        }
+      }
+    }
+    if(show_terrain_normals==1){
+      for(j = 0; j<terri->jbar; j+=MAX(ABS(terrain_normal_skip),1)){
+        for(i = 0; i<terri->ibar; i+= MAX(ABS(terrain_normal_skip), 1)){
+          unsigned char *uc_zn;
+          float zval11;
+
+          zval11 = znode[ijnode3(i,     j)]+ZOFFSET;
+
+          uc_zn = uc_znormal+ijnode3(i, j);
+          zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
+
+          glVertex3f(x[i], y[j], zval11);
+          glVertex3f(x[i]  +terrain_normal_length*zn[0],
+                     y[j]  +terrain_normal_length*zn[1],
+                     zval11+terrain_normal_length*zn[2]);
+        }
+      }
+    }
+    glEnd();
+  }
   glPopMatrix();
 
 }
 
-/* ------------------ drawterrain_texture ------------------------ */
+/* ------------------ DrawTerrainTexture ------------------------ */
 
-void drawterrain_texture(terraindata *terri, int only_geom){
+void DrawTerrainTexture(terraindata *terri){
   float *znode;
   unsigned char *uc_znormal, *uc_zn;
   int nxcell,nycell;
@@ -759,10 +750,10 @@ void drawterrain_texture(terraindata *terri, int only_geom){
   terrain_color[3]=1.0;
 
   glPushMatrix();
-  glScalef(SCALE2SMV(mscale[0]),SCALE2SMV(mscale[1]),SCALE2SMV(mscale[2]));
+  glScalef(SCALE2SMV(mscale[0]),SCALE2SMV(mscale[1]),vertical_factor*SCALE2SMV(mscale[2]));
   glTranslatef(-xbar0,-ybar0,-zbar0);
 
-  glEnable(GL_LIGHTING);
+  ENABLE_LIGHTING;
   glMaterialfv(GL_FRONT_AND_BACK,GL_SHININESS,&block_shininess);
   glTexEnvf(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_MODULATE);
   glEnable(GL_TEXTURE_2D);
@@ -773,11 +764,11 @@ void drawterrain_texture(terraindata *terri, int only_geom){
   glBegin(GL_QUADS);
   uc_znormal = terri->uc_znormal;
   znode = terri->znode;
-  nxcell = terri->nx;
-  nycell = terri->ny;
-  x = terri->x;
-  y = terri->y;
-  for(j=0;j<terri->ny;j++){
+  nxcell = terri->ibar;
+  nycell = terri->jbar;
+  x = terri->xplt;
+  y = terri->yplt;
+  for(j=0;j<terri->jbar;j++){
     int jp1;
     float ty,typ1;
 
@@ -785,7 +776,7 @@ void drawterrain_texture(terraindata *terri, int only_geom){
     ty = (y[j]-ybar0ORIG)/(ybarORIG-ybar0ORIG);
     typ1 = (y[j+1]-ybar0ORIG)/(ybarORIG-ybar0ORIG);
 
-    for(i=0;i<terri->nx;i++){
+    for(i=0;i<terri->ibar;i++){
       float *zn;
       int ip1;
       float tx,txp1;
@@ -795,25 +786,25 @@ void drawterrain_texture(terraindata *terri, int only_geom){
       txp1 = (x[i+1]-xbar0ORIG)/(xbarORIG-xbar0ORIG);
 
       uc_zn = uc_znormal+ijnode2(i,j);
-      zn = getnormalvectorptr(wui_sphereinfo, (unsigned int)(*uc_zn));
+      zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
       glNormal3fv(zn);
       glTexCoord2f(tx,ty);
       glVertex3f(x[i],y[j],znode[ijnode3(i,j)]);
 
       uc_zn = uc_znormal+ijnode2(ip1,j);
-      zn = getnormalvectorptr(wui_sphereinfo, (unsigned int)(*uc_zn));
+      zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
       glNormal3fv(zn);
       glTexCoord2f(txp1,ty);
       glVertex3f(x[i+1],y[j],znode[ijnode3(ip1,j)]);
 
       uc_zn = uc_znormal+ijnode2(ip1,jp1);
-      zn = getnormalvectorptr(wui_sphereinfo, (unsigned int)(*uc_zn));
+      zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
       glNormal3fv(zn);
       glTexCoord2f(txp1,typ1);
       glVertex3f(x[i+1],y[j+1],znode[ijnode3(ip1,jp1)]);
 
       uc_zn = uc_znormal+ijnode2(i,jp1);
-      zn = getnormalvectorptr(wui_sphereinfo, (unsigned int)(*uc_zn));
+      zn = GetNormalVectorPtr(wui_sphereinfo, (unsigned int)(*uc_zn));
       glNormal3fv(zn);
       glTexCoord2f(tx,typ1);
       glVertex3f(x[i],y[j+1],znode[ijnode3(i,jp1)]);
@@ -824,237 +815,98 @@ void drawterrain_texture(terraindata *terri, int only_geom){
   glDisable(GL_TEXTURE_2D);
 
   glDisable(GL_COLOR_MATERIAL);
-  glDisable(GL_LIGHTING);
+  DISABLE_LIGHTING;
 
   glPopMatrix();
 
 }
 
-/* ------------------ init_terraincell ------------------------ */
+/* ------------------ GetTerrainData ------------------------ */
 
-void init_terraincell(terraindata *terri){
-  int i;
-  int nx, ny;
-
-  nx = terri->nx;
-  ny = terri->ny;
-
-  NewMemory((void **)&terri->tcell, nx*ny * sizeof(terraincell));
-  for(i = 0;i < terri->nx*terri->ny;i++){
-    terraincell *ti;
-    int nalloc;
-
-    nalloc = 5;
-    ti = terri->tcell + i;
-    ti->nallocated = nalloc;
-    ti->nstates = 0;
-    ti->state = NULL;
-    ti->interval = 0;
-    ti->time = NULL;
-    NewMemory((void **)&ti->state, nalloc);
-    NewMemory((void **)&ti->time, nalloc * sizeof(float));
-  }
-
-}
-
-/* ------------------ free_terraincell ------------------------ */
-
-void free_terraincell(terraindata *terri){
-  int i;
-  if(terri->tcell != NULL){
-    for(i = 0;i < terri->nx*terri->ny;i++){
-      terraincell *ti;
-
-      ti = terri->tcell + i;
-
-      FREEMEMORY(ti->time);
-      FREEMEMORY(ti->state);
-    }
-    FREEMEMORY(terri->tcell);
-  }
-}
-
-/* ------------------ init_tnode ------------------------ */
-
-void init_tnode(terraindata *terri){
-  float *znode, *zcell;
-  int i, j;
-  int nxcell;
-
-  znode = terri->znode;
-  zcell = terri->zcell;
-  nxcell = terri->nx;
-  for(j = 0;j <= terri->ny;j++){
-    int jm1, im1, ii, jj;
-    float zz;
-
-    jm1 = j - 1;
-    if(jm1 < 0)jm1 = 0;
-    jj = j;
-    if(jj == terri->ny)jj--;
-
-    for(i = 0;i <= terri->nx;i++){
-      im1 = i - 1;
-      if(im1 < 0)im1 = 0;
-      ii = i;
-      if(ii == terri->nx)ii--;
-
-      zz = zcell[IJCELL2(im1, jm1)];
-      zz += zcell[IJCELL2(im1, jj)];
-      zz += zcell[IJCELL2(ii, jm1)];
-      zz += zcell[IJCELL2(ii, jj)];
-      zz *= 0.25;
-      *znode++ = zz;
-    }
-  }
-}
-
-/* ------------------ init_tnorm ------------------------ */
-
-void init_tnorm(terraindata *terri){
-  float *znode;
-  unsigned char *uc_znormal;
-  float znormal3[3];
-  int i, j;
-  int nycell;
-  float dx, dy;
-
-  //znormal = terri->znormal;
-  uc_znormal = terri->uc_znormal;
-  znode = terri->znode;
-  nycell = terri->ny;
-  dx = (terri->xmax - terri->xmin) / terri->nx;
-  dy = (terri->ymax - terri->ymin) / terri->ny;
-
-  for(j = 0;j <= terri->ny;j++){
-    int jp1, ip1;
-    float dzdx, dzdy;
-    float sum;
-
-    jp1 = j + 1;
-    if(jp1 > terri->ny)jp1 = terri->ny;
-
-    for(i = 0;i <= terri->nx;i++){
-      ip1 = i + 1;
-      if(ip1 > terri->nx)ip1 = terri->nx;
-      dzdx = (znode[ijnode3(ip1, j)] - znode[ijnode3(i, j)]) / dx;
-      dzdy = (znode[ijnode3(i, jp1)] - znode[ijnode3(i, j)]) / dy;
-
-      //     i  j  k
-      //     1  0 dzdx           uu
-      //     0  1 dzdy           vv
-
-      //     -dzdx -dzdy 1       uu x vv
-
-
-      //      znormal = terri->znormal + 3*ijnode2(i,j);
-      uc_znormal = terri->uc_znormal + ijnode3(i, j);
-      znormal3[0] = -dzdx;
-      znormal3[1] = -dzdy;
-      znormal3[2] = 1.0;
-
-      sum = znormal3[0] * znormal3[0];
-      sum += znormal3[1] * znormal3[1];
-      sum += znormal3[2] * znormal3[2];
-      sum = sqrt(sum);
-      znormal3[0] /= sum;
-      znormal3[1] /= sum;
-      znormal3[2] /= sum;
-      *uc_znormal = getnormalindex(wui_sphereinfo, znormal3);
-    }
-  }
-}
-
-/* ------------------ getterrain_data ------------------------ */
-
-int getterrain_data(char *file, terraindata *terri){
+int GetTerrainData(char *file, terraindata *terri){
   FILE *WUIFILE;
-  int one;
-  int endianswitch = 0;
-  size_t returncode;
-  float time_local;
-  int nchanges;
-  int nt;
-  int nx, ny;
-  int *cellindex_buffer;
-  unsigned char *cellstate_buffer;
-  float *times_local;
-  int ntotal;
+  float zmin_cutoff;
+  int ibp1, jbp1, ijbar[2];
+  float *xplt, *yplt, *z_terrain;
+  int returncode=1;
+  int nvalues,i;
+#ifdef pp_DEBUG_TERRAIN
+  FILE *stream = NULL;
+  char fileout[255];
+#endif
 
+#ifdef _DEBUG
+  printf("reading terrain data mesh: %i\n",(int)(terri-terraininfo));
+#endif
   WUIFILE = fopen(file, "rb");
   if(WUIFILE == NULL)return 1;
 
-  FSEEK(WUIFILE, 4, SEEK_CUR);fread(&one, 4, 1, WUIFILE);FSEEK(WUIFILE, 4, SEEK_CUR);
-  if(one != 1)endianswitch = 1;
+//    WRITE(LU_TERRAIN(NM)) REAL(M%ZS-1._EB, FB)
+//    WRITE(LU_TERRAIN(NM)) IBP1, JBP1
+//    WRITE(LU_TERRAIN(NM)) (M%XPLT(I), I = 0, IBAR)
+//    WRITE(LU_TERRAIN(NM)) (M%YPLT(J), J = 0, JBAR)
+//    WRITE(LU_TERRAIN(NM)) Z_TERRAIN
 
-  FSEEK(WUIFILE, 12, SEEK_CUR);    // skip over version
-  FSEEK(WUIFILE, 8 + 4 * 4, SEEK_CUR); // skip over xmin,xmax,ymin,ymax
-  FSEEK(WUIFILE, 8 + 2 * 4, SEEK_CUR); // skip over nx, ny
+  FORTWUIREAD(&zmin_cutoff, 1);
+  zmin_cutoff -= 0.1;
+  terri->zmin_cutoff = zmin_cutoff;
+  FORTWUIREAD(ijbar, 2);
+  ibp1 = ijbar[0];
+  jbp1 = ijbar[1];
 
-  nx = terri->nx;
-  ny = terri->ny;
-  ntotal = nx*ny;
-  times_local = terri->times;
+  NewMemory((void **)&xplt, ibp1*sizeof(float));
+  NewMemory((void **)&yplt, jbp1*sizeof(float));
+  terri->xplt = xplt;
+  terri->yplt = yplt;
+  FORTWUIREAD(xplt, ibp1);
+  FORTWUIREAD(yplt, jbp1);
 
-  NewMemory((void **)&cellindex_buffer, nx*ny * sizeof(int));
-  NewMemory((void **)&cellstate_buffer, nx*ny);
-
-
-  FORTWUIREAD(terri->zcell, ntotal);
-  FSEEK(WUIFILE, 4, SEEK_CUR);fread(terri->state, 1, ntotal, WUIFILE);FSEEK(WUIFILE, 4, SEEK_CUR);
-  init_tnode(terri);
-  init_tnorm(terri);
-
-  for(nt = 0;nt < terri->ntimes;nt++){
-
-    FORTWUIREAD(&time_local, 1);
-    PRINTF("terrain time=%f\n", time_local);
-    if(returncode == 0)break;
-    *times_local++ = time_local;
-
-    FORTWUIREAD(&nchanges, 1);
-    if(returncode == 0)break;
-
-    if(nchanges > 0){
-      int i;
-
-      FORTWUIREAD(cellindex_buffer, nchanges);
-      if(returncode == 0)break;
-      FSEEK(WUIFILE, 4, SEEK_CUR);returncode = fread(cellstate_buffer, 1, nchanges, WUIFILE);FSEEK(WUIFILE, 4, SEEK_CUR);
-      if(returncode == 0)break;
-      for(i = 0;i < nchanges;i++){
-        terraincell *ti;
-        int ii;
-
-        ti = terri->tcell + cellindex_buffer[i];
-        if(ti->nstates + 1 > ti->nallocated){
-          ti->nallocated = ti->nstates + 5;
-          ResizeMemory((void **)&ti->state, ti->nallocated);
-          ResizeMemory((void **)&ti->time, ti->nallocated * sizeof(float));
-        }
-        ii = ti->nstates;
-        ti->state[ii] = cellstate_buffer[i];
-        ti->time[ii] = time_local;
-        ti->nstates++;
-      }
-    }
-
+  if(terri->znode==NULL){
+    NewMemory((void **)&z_terrain, ibp1*jbp1*sizeof(float));
+    terri->znode = z_terrain;
   }
+  else{
+    z_terrain = terri->znode;
+  }
+  FORTWUIREAD(z_terrain, ibp1*jbp1);
 
+  for(i = 0, nvalues=0; i<ibp1*jbp1; i++){
+    if(z_terrain[i]>zmin_cutoff)nvalues++;
+  }
+#ifdef pp_DEBUG_TERRAIN
+  strcpy(fileout, file);
+  strcat(fileout, ".csv");
+  stream = fopen(fileout, "w");
+  if(stream!=NULL){
+    int j;
+
+    fprintf(stream, "%s\n", file);
+    fprintf(stream, " ibar+1,jbar+1,xmin,xmax,ymin,ymax,z cutoff\n");
+    fprintf(stream, " %i,%i,%f,%f,%f,%f,%f\n", ibp1, jbp1,xplt[0], xplt[ibp1-1], yplt[0], yplt[jbp1-1],zmin_cutoff);
+    fprintf(stream, "\nelevations\n");
+    for(j = jbp1-1; j>=0; j--){
+      for(i = 0; i<ibp1-1; i++){
+        fprintf(stream, " %f,", z_terrain[i*jbp1+j]);
+      }
+      i = ibp1-1;
+      fprintf(stream, " %f\n", z_terrain[i*jbp1+j]);
+    }
+    fclose(stream);
+  }
+#endif
+  terri->nvalues = nvalues;
+  if(returncode!=0)returncode=0;
   fclose(WUIFILE);
-  FREEMEMORY(cellindex_buffer);
-  FREEMEMORY(cellstate_buffer);
-  return 0;
+  return returncode;
 }
 
-/* ------------------ getterrain_size ------------------------ */
+/* ------------------ GetTerrainSize ------------------------ */
 
-int getterrain_size(char *file, float *xmin, float *xmax, int *nx, float *ymin, float *ymax, int *ny, int *times_local){
+int GetTerrainSize(char *file, float *xmin, float *xmax, int *nx, float *ymin, float *ymax, int *ny, int *times_local){
   FILE *WUIFILE;
   int one;
   float xyminmax[4];
   int nxy[2];
-  int endianswitch = 0;
   size_t returncode;
   int version;
   float time_local;
@@ -1065,7 +917,6 @@ int getterrain_size(char *file, float *xmin, float *xmax, int *nx, float *ymin, 
   if(WUIFILE == NULL)return 1;
 
   FSEEK(WUIFILE, 4, SEEK_CUR);fread(&one, 4, 1, WUIFILE);FSEEK(WUIFILE, 4, SEEK_CUR);
-  if(one != 1)endianswitch = 1;
 
   FORTWUIREAD(&version, 1);
   FORTWUIREAD(xyminmax, 4);
@@ -1100,95 +951,17 @@ int getterrain_size(char *file, float *xmin, float *xmax, int *nx, float *ymin, 
   return 0;
 }
 
-/* ------------------ readterrain ------------------------ */
+/* ------------------ UpdateTerrain ------------------------ */
 
-void readterrain(char *file, int ifile, int flag, int *errorcode){
-  terraindata *terri=NULL;
-  float xmin, xmax;
-  int nx;
-  float ymin, ymax;
-  int ny;
-  float *x, *y;
-  float dx, dy;
-  int i;
-
-  if(ifile<0||ifile>=nterraininfo)return;
-  terri = terraininfo + ifile;
-
-  if(flag==UNLOAD){
-    FREEMEMORY(terri->x);
-    FREEMEMORY(terri->y);
-    FREEMEMORY(terri->zcell);
-    FREEMEMORY(terri->znode);
-    FREEMEMORY(terri->uc_znormal);
-    FREEMEMORY(terri->times);
-    free_terraincell(terri);
-    terri->loaded=0;
-    terri->display=0;
-    UpdateTimes();
-    return;
-  }
-
-  if(getterrain_size(file,&xmin, &xmax, &nx, &ymin, &ymax, &ny, &nglobal_times)!=0)return;
-
-  terri->xmin = xmin;
-  terri->xmax = xmax;
-  terri->nx = nx;
-  terri->ymin = ymin;
-  terri->ymax = ymax;
-  terri->ny = ny;
-  terri->ntimes=nglobal_times;
-
-  NewMemory((void **)&terri->times,nglobal_times*sizeof(float));
-  NewMemory((void **)&terri->x,(nx+1)*sizeof(float));
-  NewMemory((void **)&terri->y,(ny+1)*sizeof(float));
-  NewMemory((void **)&terri->zcell,nx*ny*sizeof(float));
-  NewMemory((void **)&terri->state,nx*ny);
-  NewMemory((void **)&terri->znode,(nx+1)*(ny+1)*sizeof(float));
-//  NewMemory((void **)&terri->znormal,3*(nx+1)*(ny+1)*sizeof(float));
-  init_terraincell(terri);
-
-  x = terri->x;
-  y = terri->y;
-  
-  dx = (xmax-xmin)/(float)nx;
-  dy = (ymax-ymin)/(float)ny;
-  
-  for(i=0;i<nx;i++){
-    x[i] = xmin + dx*i;
-  }
-  x[nx] = xmax;
-  
-  for(i=0;i<ny;i++){
-    y[i] = ymin + dy*i;
-  }
-  y[ny] = ymax;
-
-  if(getterrain_data(file,terri)!=0){
-    readterrain("",ifile,UNLOAD,errorcode);
-    return;
-  }
-  terri->loaded=1;
-  visTerrainType=TERRAIN_3D;
-  plotstate=GetPlotState(DYNAMIC_PLOTS);
-  UpdateTimes();
-#ifdef pp_MEMPRINT
-  PRINTF("After terrain file load: \n");
-  PrintMemoryInfo;
-#endif
-  Idle_CB();
-  glutPostRedisplay();
-}
-
-/* ------------------ update_terrain ------------------------ */
-
-void update_terrain(int allocate_memory, float vertical_factor_local){
-  if(autoterrain==1){
+void UpdateTerrain(int allocate_memory, float vertical_factor_local){
+  if(auto_terrain==1||manual_terrain==1){
     int i;
 
-    nterraininfo = nmeshes;
-    if(allocate_memory==1){
-      NewMemory((void **)&terraininfo,nterraininfo*sizeof(terraindata));
+    if(manual_terrain==0){
+      nterraininfo = nmeshes;
+      if(allocate_memory==1&&manual_terrain==0){
+        NewMemory((void **)&terraininfo, nterraininfo*sizeof(terraindata));
+      }
     }
 
     for(i=0;i<nmeshes;i++){
@@ -1198,7 +971,13 @@ void update_terrain(int allocate_memory, float vertical_factor_local){
       int nx, ny;
 
       meshi=meshinfo + i;
-      terri = terraininfo + i;
+      if(manual_terrain==1){
+        terri = meshi->terrain;
+      }
+      else{
+        terri = terraininfo + i;
+        terri->file = NULL;
+      }
 
       nx = meshi->ibar;
       ny = meshi->jbar;
@@ -1207,10 +986,14 @@ void update_terrain(int allocate_memory, float vertical_factor_local){
       ymin = meshi->yplt_orig[0];
       ymax = meshi->yplt_orig[ny];
 
-      initterrain_znode(meshi, terri, xmin, xmax, nx, ymin, ymax, ny, allocate_memory);
-      InitContour(&meshi->terrain_contour,rgbptr,nrgb);
+      InitTerrainZNode(meshi, terri, xmin, xmax, nx, ymin, ymax, ny, allocate_memory);
     }
-    initterrain_all();
+    if(manual_terrain==0){ // slow
+      ComputeTerrainNormalsAuto();
+    }
+    if(manual_terrain==1){
+      ComputeTerrainNormalsManual();
+    }
   }
   if(nterraininfo>0){
     int imesh;
@@ -1228,8 +1011,8 @@ void update_terrain(int allocate_memory, float vertical_factor_local){
       znode = terri->znode;
       znode_scaled = terri->znode_scaled;
 
-      for(j=0;j<=terri->ny;j++){
-        for(i=0;i<=terri->nx;i++){
+      for(j=0;j<=terri->jbar;j++){
+        for(i=0;i<=terri->ibar;i++){
           *znode_scaled = NORMALIZE_Z(*znode);
           znode++;
           znode_scaled++;
@@ -1239,9 +1022,9 @@ void update_terrain(int allocate_memory, float vertical_factor_local){
   }
 }
 
-/* ------------------ have_terrain_slice ------------------------ */
+/* ------------------ HaveTerrainSlice ------------------------ */
 
-int have_terrain_slice(void){
+int HaveTerrainSlice(void){
   int i;
 
   for(i=0;i<nsliceinfo;i++){
@@ -1249,16 +1032,16 @@ int have_terrain_slice(void){
 
     slicei = sliceinfo + i;
 
-    if(slicei->loaded==1&&slicei->slicetype==SLICE_TERRAIN)return 1;
+    if(slicei->loaded==1&&slicei->slice_filetype==SLICE_TERRAIN)return 1;
 
   }
   return 0;
 }
 
-/* ------------------ if_slice_terrain ------------------------ */
+/* ------------------ UpdateTerrainOptions ------------------------ */
 
-void update_terrain_options(void){
-  if(nterraininfo>0||autoterrain==1){
+void UpdateTerrainOptions(void){
+  if(nterraininfo>0||auto_terrain==1){
     visOpenVents=0;
     visDummyVents=0;
     visFrame=0;
@@ -1276,12 +1059,13 @@ float GetMeshZCell(meshdata *meshi, float xval, float yval, int *valid){
   float zval;
   int nxcell;
 
+  *valid = 0;
+  if(meshi==NULL)return 0.0;
   xplt = meshi->xplt_orig;
   yplt = meshi->yplt_orig;
   ibar = meshi->ibar;
   jbar = meshi->jbar;
   nxcell = ibar;
-  *valid = 0;
   if(xval<xplt[0]||xval>xplt[ibar])return 0.0;
   if(yval<yplt[0]||yval>yplt[jbar])return 0.0;
 
@@ -1297,15 +1081,34 @@ float GetMeshZCell(meshdata *meshi, float xval, float yval, int *valid){
   return zval;
 }
 
-/* ------------------ update_mesh_terrain ------------------------ */
+/* ------------------ UpdateMeshTerrain ------------------------ */
 
-void update_mesh_terrain(void){
+void UpdateMeshTerrain(void){
   int i;
 
   if(nterraininfo<=0)return;
+  for(i = 0; i<nmeshes; i++){
+    int j;
+    meshdata *meshi;
+
+    meshi = meshinfo+i;
+
+    for(j = 0; j<nmeshes; j++){
+      meshdata *meshj;
+
+      meshj = meshinfo+j;
+      if(meshi==meshj||meshj->above!=NULL)continue;
+
+#define MUP 5
+      if(MeshConnect(meshi, MUP, meshj)==1){
+        meshi->above = meshj;
+        break;
+      }
+    }
+  }
   for(i=0;i<nmeshes;i++){
     meshdata *meshi;
-    meshdata *meshj;
+    meshdata *meshj=NULL;
     int ii, jj;
     float *x, *y, *z;
     float xyz[3];
@@ -1324,7 +1127,7 @@ void update_mesh_terrain(void){
       xyz[0]=x[ii];
       for(jj=0;jj<meshi->jbar;jj++){
         xyz[1]=y[jj];
-        meshj = GetMesh(xyz);
+        meshj = GetMesh(xyz,meshj);
         if(meshj==NULL||meshj==meshi)continue;
         meshi->is_bottom=0;
         break;
@@ -1335,9 +1138,9 @@ void update_mesh_terrain(void){
 
   // compute z level above bottom mesh
 
-  for(i=0;i<nmeshes;i++){
+  for(i=0;i<nmeshes;i++){ // xxslow
     meshdata *meshi;
-    int ii, jj;
+    int ii;
     float xyz[3], *x, *y;
     float *zcell;
     int nxcell;
@@ -1349,31 +1152,17 @@ void update_mesh_terrain(void){
     nxcell = meshi->ibar;
     zcell = meshi->zcell;
     for(ii=0;ii<meshi->ibar;ii++){
+      int jj;
+
       xyz[0]=x[ii];
       for(jj=0;jj<meshi->jbar;jj++){
-        int j;
+        int ij, valid;
+        float zz;
 
+        ij = IJCELL2(ii, jj);
         xyz[1]=y[jj];
-        for(j=0;j<nmeshes;j++){
-          meshdata *meshj,*mesh_above;
-
-          meshj = meshinfo + j;
-          if(meshi==meshj)continue;
-          xyz[2]=meshj->zplt_orig[1];
-          mesh_above= GetMesh(xyz);
-          if(mesh_above!=NULL){
-            float zz;
-            int valid;
-            int ij;
-
-            ij = IJCELL2(ii,jj);
-            zz= GetMeshZCell(mesh_above, xyz[0],xyz[1], &valid);
-            ij=IJCELL2(ii,jj);
-            if(valid==1&&zz>zcell[ij]){
-              zcell[ij]=zz;
-            }
-          }
-        }
+        zz= GetMeshZCell(meshi->above, xyz[0],xyz[1], &valid);
+        if(valid==1&&zz>zcell[ij])zcell[ij]=zz;
       }
     }
   }

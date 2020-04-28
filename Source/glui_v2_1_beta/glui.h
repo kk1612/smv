@@ -21,7 +21,11 @@
 #define _GLUI_H_
 
 #ifdef pp_OSX
+#ifdef pp_QUARTZ
+#include <GL/glut.h>
+#else
 #include <GLUT/glut.h>
+#endif
 #else
 #include <GL/glut.h>
 #endif
@@ -556,7 +560,7 @@ protected:
   GLUI_Control *mouse_over_control;
   GLUI_Panel   *main_panel;
   int           curr_cursor;
-  int           w, h;
+  int           w;
   long          flags; 
   int           closing;
   int           parent_window;
@@ -636,6 +640,7 @@ public:
   float            bkgd_color_f[3];
 
   void            *font;
+  int              h;
   int              curr_modifiers;
 
   void         adjust_glut_xy( int &x, int &y ) { y = h-y; };

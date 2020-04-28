@@ -25,11 +25,117 @@ int lua_displayCB(lua_State *L);
 #define snprintf _snprintf
 #endif
 
+void ParseCommandline(int argc, char **argv);
+void Usage(char *prog,int option);
+
+int ProgramSetupLua(lua_State *L, int argc, char **argv_sv) {
+  char *progname;
+  InitVars();
+  if(argc==1)DisplayVersionInfo("Smokeview ");
+
+  if(argc==0||argc==1)exit(0);
+
+  progname=argv_sv[0];
+
+  ParseCommonOptions(argc, argv_sv);
+  if(show_help==1){
+    Usage("smokeview",HELP_SUMMARY);
+    exit(0);
+}
+  if(show_version==1){
+    PRINTVERSION("smokeview", argv_sv[0]);
+    exit(0);
+  }
+
+  prog_fullpath = progname;
+#ifdef pp_LUA
+  smokeview_bindir_abs=getprogdirabs(progname,&smokeviewpath);
+#endif
+  ParseCommandline(argc, argv_sv);
+  if(smokeview_bindir==NULL){
+    smokeview_bindir= GetProgDir(progname,&smokeviewpath);
+  }
+  InitTextureDir();
+  smokezippath= GetSmokeZipPath(smokeview_bindir);
+#ifdef pp_ffmpeg
+#ifdef WIN32
+  have_ffmpeg = HaveProg("ffmpeg -version> Nul 2>Nul");
+  have_ffplay = HaveProg("ffplay -version> Nul 2>Nul");
+#else
+  have_ffmpeg = HaveProg("ffmpeg -version >/dev/null 2>/dev/null");
+  have_ffplay = HaveProg("ffplay -version >/dev/null 2>/dev/null");
+#endif
+#endif
+  DisplayVersionInfo("Smokeview ");
+
+  return 0;
+}
+
+int lua_SetupGLUT(lua_State *L) {
+  int argc = lua_tonumber(L, 1);
+  char **argv_sv = lua_topointer(L, 2);
+  SetupGlut(argc,argv_sv);
+  return 0;
+}
+
+int lua_SetupCase(lua_State *L) {
+  int argc = lua_tonumber(L, 1);
+  char **argv_sv = lua_topointer(L, 2);
+  int return_code = SetupCase(argc,argv_sv);
+  lua_pushnumber(L, return_code);
+  return 1;
+}
+
+int RunLuaBranch(lua_State *L, int argc, char **argv) {
+  int return_code;
+  char **argv_sv;
+  SetStdOut(stdout);
+  initMALLOC();
+  InitRandAB(1000000);
+  CopyArgs(&argc, argv, &argv_sv);
+  // Setup the program, including parsing commandline arguments. Does not
+  // initialise any graphical components.
+  ProgramSetupLua(L, argc, argv_sv);
+  // From here on out, control is passed to the lua interpreter. All further
+  // setup, including graphical display setup, is handled (or at least
+  // triggered) by the interpreter.
+  // TODO: currently the commands are issued here via C, but they are designed
+  // such that they can be issued from lua.
+  // Setup glut. TODO: this is currently done via to C because the commandline
+  // arguments are required for glutInit.
+
+  lua_pushnumber(L, argc);
+  lua_pushlightuserdata(L, argv_sv);
+  lua_SetupGLUT(L);
+  START_TIMER(startup_time);
+  START_TIMER(read_time_elapsed);
+  // Load information about smokeview into the lua interpreter.
+  lua_initsmvproginfo(L);
+
+  // return_code= SetupCase(argc,argv_sv);
+  lua_pushnumber(L, argc);
+  lua_pushlightuserdata(L, argv_sv);
+  lua_SetupCase(L);
+  return_code = lua_tonumber(L,-1);
+
+  if(return_code==0&&update_bounds==1)return_code=Update_Bounds();
+  if(return_code!=0)return 1;
+  if(convert_ini==1){
+    ReadIni(ini_from);
+  }
+  // Load information about the case into the lua interpreter.
+  lua_initsmvdata(L);
+
+  STOP_TIMER(startup_time);
+  PRINTF("\nStartup time: %.1f s\n", startup_time);
+  glutMainLoop();
+}
+
 /* ------------------ load_script ------------------------ */
 // There are two options for scripting, Lua and SSF. Which is run is set here
 // based on the commandline arguments. If either (exclusive) of these values
 // are set to true, then that script will run from within the display callback
-// (Display_CB, in callbacks.c). These two loading routines are included to
+// (DisplayCB, in callbacks.c). These two loading routines are included to
 // load the scripts early in the piece, before the display callback.
 // Both runluascript and runscript are global.
 int load_script(char *filename) {
@@ -174,7 +280,7 @@ int lua_settourkeyframe(lua_State *L) {
 */
 int lua_displayCB(lua_State *L) {
   // runluascript=0;
-  Display_CB();
+  DisplayCB();
   // runluascript=1;
   return 0;
 }
@@ -640,6 +746,10 @@ int lua_initsmvdata(lua_State *L) {
   lua_get_sliceinfo(L);
   lua_setglobal(L, "sliceinfo");
 
+  lua_get_rampinfo(L);
+  lua_setglobal(L, "rampinfo");
+
+
   lua_get_csvinfo(L);
   // csvinfo is currently on the stack
   // add a metatable to it.
@@ -667,6 +777,7 @@ int lua_initsmvproginfo(lua_State *L) {
   char githash[256];
 
   GetProgVersion(version);
+  addLuaPaths(L);
   // getGitHash(githash);
 
   lua_createtable(L, 0, 6);
@@ -747,7 +858,8 @@ int lua_slice_get_times(lua_State *L) {
   // Push a lightuserdata (a pointer) onto the lua stack that points to the
   // qslicedata.
   lua_createtable(L, slice->ntimes, 0);
-  for (int i = 0; i < slice->ntimes; i++) {
+  int i;
+  for (i = 0; i < slice->ntimes; i++) {
     lua_pushnumber(L, i+1);
     lua_pushnumber(L, slice->times[i]);
     lua_settable(L, -3);
@@ -768,7 +880,8 @@ int lua_slice_data_map_frames(lua_State *L) {
   // The second argument is the function to be called on each frame.
   lua_createtable(L, slice->ntimes, 0);
   // framenumber is the index of the frame (0-based).
-  for (int framenumber = 0; framenumber < slice->ntimes; framenumber++) {
+  int framenumber;
+  for (framenumber = 0; framenumber < slice->ntimes; framenumber++) {
     // duplicate the function so that we can use it and keep it
     lua_pushvalue (L, 2);
     // Push the first frame onto the stack by first putting them into a lua
@@ -781,7 +894,8 @@ int lua_slice_data_map_frames(lua_State *L) {
     // this table method is more flexible but slower
     lua_createtable(L, framepoints, 0);
     // pointnumber is the index of the data point in the frame (0-based).
-    for (int pointnumber = 0; pointnumber < framepoints; pointnumber++) {
+    int pointnumber;
+    for (pointnumber = 0; pointnumber < framepoints; pointnumber++) {
       // adjust the index to start from 1
       lua_pushnumber(L, pointnumber+1);
       lua_pushnumber(L, qslicedata[framenumber*framepoints+pointnumber]);
@@ -811,9 +925,11 @@ int lua_slice_data_map_frames_count_less(lua_State *L) {
   // Pointer to the first frame.
   float *qslicedata = slice->qslicedata;
   lua_createtable(L, slice->ntimes, 0);
-  for (int framenumber = 0; framenumber < slice->ntimes; framenumber++) {
+  int framenumber;
+  for (framenumber = 0; framenumber < slice->ntimes; framenumber++) {
     int count = 0;
-    for (int pointnumber = 0; pointnumber < framepoints; pointnumber++) {
+    int pointnumber;
+    for (pointnumber = 0; pointnumber < framepoints; pointnumber++) {
       if (*qslicedata < threshold) {
         count++;
       }
@@ -837,9 +953,11 @@ int lua_slice_data_map_frames_count_less_eq(lua_State *L) {
   // Pointer to the first frame.
   float *qslicedata = slice->qslicedata;
   lua_createtable(L, slice->ntimes, 0);
-  for (int framenumber = 0; framenumber < slice->ntimes; framenumber++) {
+  int framenumber;
+  for (framenumber = 0; framenumber < slice->ntimes; framenumber++) {
     int count = 0;
-    for (int pointnumber = 0; pointnumber < framepoints; pointnumber++) {
+    int pointnumber;
+    for (pointnumber = 0; pointnumber < framepoints; pointnumber++) {
       if (*qslicedata <= threshold) {
         count++;
       }
@@ -863,9 +981,11 @@ int lua_slice_data_map_frames_count_greater(lua_State *L) {
   // Pointer to the first frame.
   float *qslicedata = slice->qslicedata;
   lua_createtable(L, slice->ntimes, 0);
-  for (int framenumber = 0; framenumber < slice->ntimes; framenumber++) {
+  int framenumber;
+  for (framenumber = 0; framenumber < slice->ntimes; framenumber++) {
     int count = 0;
-    for (int pointnumber = 0; pointnumber < framepoints; pointnumber++) {
+    int pointnumber;
+    for (pointnumber = 0; pointnumber < framepoints; pointnumber++) {
       if (*qslicedata > threshold) {
         count++;
       }
@@ -889,9 +1009,11 @@ int lua_slice_data_map_frames_count_greater_eq(lua_State *L) {
   // Pointer to the first frame.
   float *qslicedata = slice->qslicedata;
   lua_createtable(L, slice->ntimes, 0);
-  for (int framenumber = 0; framenumber < slice->ntimes; framenumber++) {
+  int framenumber;
+  for (framenumber = 0; framenumber < slice->ntimes; framenumber++) {
     int count = 0;
-    for (int pointnumber = 0; pointnumber < framepoints; pointnumber++) {
+    int pointnumber;
+    for (pointnumber = 0; pointnumber < framepoints; pointnumber++) {
       if (*qslicedata >= threshold) {
         count++;
       }
@@ -938,8 +1060,8 @@ int lua_get_sliceinfo(lua_State *L) {
     lua_pushstring(L, sliceinfo[i].file);
     lua_setfield(L, -2, "file");
 
-    lua_pushnumber(L, sliceinfo[i].slicetype);
-    lua_setfield(L, -2, "slicetype");
+    lua_pushnumber(L, sliceinfo[i].slice_filetype);
+    lua_setfield(L, -2, "slicefile_type");
 
     lua_pushnumber(L, sliceinfo[i].idir);
     lua_setfield(L, -2, "idir");
@@ -979,6 +1101,43 @@ int lua_get_sliceinfo(lua_State *L) {
 
     lua_pushstring(L, sliceinfo[i].slicedir);
     lua_setfield(L, -2, "slicedir");
+
+    lua_settable(L, -3);
+  }
+  return 1;
+}
+
+/*
+  Build a Lua table with information on the ramps of the model.
+*/
+// TODO: change this to use userdata instead
+int lua_get_rampinfo(lua_State *L) {
+  PRINTF("lua: initialising ramp table\n");
+  lua_createtable(L, 0, nrampinfo);
+  int i;
+  for (i = 0; i < nrampinfo; i++) {
+    lua_pushnumber(L, i+1);
+    lua_createtable(L, 0, 3);
+
+    if(rampinfo[i].name != NULL) {
+      lua_pushstring(L, rampinfo[i].name);
+      lua_setfield(L, -2, "name");
+    }
+
+    lua_createtable(L, 0, rampinfo[i].nentries);
+    int j;
+    for (j = 0; j < rampinfo[i].nentries; j++) {
+      lua_createtable(L, 0, 2);
+
+      lua_pushnumber(L, rampinfo[i].values[2*j]);
+      lua_setfield(L, -2, "t");
+
+      lua_pushnumber(L, rampinfo[i].values[2*j+1]);
+      lua_setfield(L, -2, "f");
+
+      lua_seti(L, -2, j+1);
+    }
+    lua_setfield(L, -2, "entries");
 
     lua_settable(L, -3);
   }
@@ -1213,7 +1372,7 @@ int lua_setwindowsize(lua_State *L) {
   int width = lua_tonumber(L, 1);
   int height = lua_tonumber(L, 2);
   setwindowsize(width, height);
-  // Using the Display_CB is not sufficient in this case,
+  // Using the DisplayCB is not sufficient in this case,
   // control must be temporarily returned to the main glut loop.
   lua_tempyieldscript(L);
   return 0;
@@ -1293,6 +1452,40 @@ int lua_get_colorbar_visibility(lua_State *L) {
 
 int lua_toggle_colorbar_visibility(lua_State *L) {
   toggle_colorbar_visibility();
+  return 0;
+}
+
+int lua_set_colorbar_visibility_horizontal(lua_State *L) {
+  int setting = lua_toboolean(L, 1);
+  set_colorbar_visibility_horizontal(setting);
+  return 0;
+}
+
+int lua_get_colorbar_visibility_horizontal(lua_State *L) {
+  int setting = get_colorbar_visibility_horizontal();
+  lua_pushboolean(L, setting);
+  return 1;
+}
+
+int lua_toggle_colorbar_visibility_horizontal(lua_State *L) {
+  toggle_colorbar_visibility_horizontal();
+  return 0;
+}
+
+int lua_set_colorbar_visibility_vertical(lua_State *L) {
+  int setting = lua_toboolean(L, 1);
+  set_colorbar_visibility_vertical(setting);
+  return 0;
+}
+
+int lua_get_colorbar_visibility_vertical(lua_State *L) {
+  int setting = get_colorbar_visibility_vertical();
+  lua_pushboolean(L, setting);
+  return 1;
+}
+
+int lua_toggle_colorbar_visibility_vertical(lua_State *L) {
+  toggle_colorbar_visibility_vertical();
   return 0;
 }
 
@@ -2084,20 +2277,6 @@ int lua_set_colortable(lua_State *L) {
   return 0;
 }
 
-int lua_set_light0(lua_State *L) {
-  int v = lua_tonumber(L, 1);
-  int return_code = set_light0(v);
-  lua_pushnumber(L, return_code);
-  return 1;
-}
-
-int lua_set_light1(lua_State *L) {
-  int v = lua_tonumber(L, 1);
-  int return_code = set_light1(v);
-  lua_pushnumber(L, return_code);
-  return 1;
-}
-
 int lua_set_lightpos0(lua_State *L) {
   float a = lua_tonumber(L, 1);
   float b = lua_tonumber(L, 2);
@@ -2114,20 +2293,6 @@ int lua_set_lightpos1(lua_State *L) {
   float c = lua_tonumber(L, 3);
   float d = lua_tonumber(L, 4);
   int return_code = set_lightpos1(a, b, c, d);
-  lua_pushnumber(L, return_code);
-  return 1;
-}
-
-int lua_set_lightmodellocalviewer(lua_State *L) {
-  int v = lua_tonumber(L, 1);
-  int return_code = set_lightmodellocalviewer(v);
-  lua_pushnumber(L, return_code);
-  return 1;
-}
-
-int lua_set_lightmodelseparatespecularcolor(lua_State *L) {
-  int v = lua_tonumber(L, 1);
-  int return_code = set_lightmodelseparatespecularcolor(v);
   lua_pushnumber(L, return_code);
   return 1;
 }
@@ -3368,30 +3533,31 @@ int lua_get_units(lua_State *L) {
 }
 
 int lua_set_units(lua_State *L) {
+  int i; // loop counter
   fprintf(stderr, "set_units\n");
   const char *unitclassname = lua_tostring(L, 1);
   const char *unitname = lua_tostring(L, 2);
-  // fprintf(stderr, "set_units (unitclassname): %s\n", unitclassname);
-  // fprintf(stderr, "set_units (unitname): %s\n", unitname);
+  fprintf(stderr, "set_units (unitclassname): %s\n", unitclassname);
+  fprintf(stderr, "set_units (unitname): %s\n", unitname);
 
   int unitclass_index;
   int unit_index;
-  for (int i=0; i < nunitclasses_default; i++) {
-    // fprintf(stderr, "set_units_loop (unitclassname): %s\n", unitclasses[i].unitclass);
+  for (i=0; i < nunitclasses_default; i++) {
+    fprintf(stderr, "set_units_loop (unitclassname): %s\n", unitclasses[i].unitclass);
     if (strcmp(unitclasses[i].unitclass,unitclassname)==0) {
       unitclass_index = i;
       break;
     }
   }
-  for (int i=0; i < unitclasses[unitclass_index].nunits; i++) {
+  for (i=0; i < unitclasses[unitclass_index].nunits; i++) {
     if (strcmp(unitclasses[unitclass_index].units[i].unit,unitname)==0) {
       unit_index = i;
       break;
     }
   }
 
-  // fprintf(stderr, "set_units (unitclassname): %s\n", unitclasses[unitclass_index].unitclass);
-  // fprintf(stderr, "set_units (unitname): %s\n", unitclasses[unitclass_index].units[unit_index].unit);
+  fprintf(stderr, "set_units (unitclassname): %s\n", unitclasses[unitclass_index].unitclass);
+  fprintf(stderr, "set_units (unitname): %s\n", unitclasses[unitclass_index].units[unit_index].unit);
   set_units(unitclass_index, unit_index);
   return 0;
 }
@@ -3698,13 +3864,6 @@ int lua_set_tourcolors_avatar(lua_State *L) {
   return 1;
 }
 
-int lua_set_tourconstantvel(lua_State *L) {
-  int v = lua_tonumber(L, 1);
-  int return_code = set_tourconstantvel(v);
-  lua_pushnumber(L, return_code);
-  return 1;
-}
-
 int lua_set_viewalltours(lua_State *L) {
   int v = lua_tonumber(L, 1);
   int return_code = set_viewalltours(v);
@@ -3776,60 +3935,6 @@ float *lua_get_float_array(lua_State *L, int snumber) {
   }
   return vals;
 }
-
-
-int lua_set_geometrytest(lua_State *L) {
-  int a = lua_tonumber(L, 1);
-  int b = lua_tonumber(L, 2);
-  float c = lua_tonumber(L, 3);
-  float d = lua_tonumber(L, 4);
-  // count the length of vals
-  int *vals;
-  float *b1Vals;
-  float *b2Vals;
-  float *b3Vals;
-  // these arrays must be freed
-  vals = lua_get_int_array(L, 5);
-  b1Vals = lua_get_float_array(L, 6);
-  b2Vals = lua_get_float_array(L, 7);
-  b3Vals = lua_get_float_array(L, 8);
-
-  int return_code = set_geometrytest(a, b, c, d, vals, b1Vals, b2Vals, b3Vals);
-  free(vals);
-  free(b1Vals);
-  free(b2Vals);
-  free(b3Vals);
-  // int set_geometrytest(int a, int b, int c, int d, int vals[],
-  //                    float b1Vals[], float b2Vals[], float b3Vals[]); // GEOMETRYTEST
-  lua_pushnumber(L, return_code);
-  return 1;
-}
-
-// int set_geometrytest(int a, int b, int c, int d, int vals[],
-//                      float b1Vals[], float b2Vals[], float b3Vals[]) {
-//   int *v;
-//   int ii;
-//   geomtest_option = a;
-//   show_tetratest_labels = b;
-//   tetra_line_thickness = c;
-//   tetra_point_size = d;
-//   v = tetrabox_vis;
-//   ONEORZERO(show_tetratest_labels);
-//   for(ii = 0; ii<10; ii++){
-//     v[ii] = vals[ii];
-//     ONEORZERO(v[ii]);
-//   }
-//   for(ii = 0; ii<6; ii++){
-//     box_bounds2[ii] = b1Vals[ii];
-//   }
-//   for(ii = 0; ii<12; ii++){
-//      tetra_vertices[ii] = b2Vals[ii];
-//   }
-//   for(ii = 0; ii<3; ii++){
-//     box_translate[ii] = b3Vals[ii];
-//   }
-//   return 0;
-// } //  GEOMETRYTEST
 
 int lua_set_devicevectordimensions(lua_State *L) {
   float baselength = lua_tonumber(L, 1);
@@ -4330,12 +4435,11 @@ void addLuaPaths(lua_State *L) {
   return;
 }
 
-void initLua() {
+lua_State* initLua() {
   L = luaL_newstate();
 
   luaL_openlibs(L);
-  lua_initsmvproginfo(L);
-  addLuaPaths(L);
+
   lua_register(L, "set_slice_bound_min", lua_set_slice_bound_min);
   lua_register(L, "set_slice_bound_max", lua_set_slice_bound_max);
   lua_register(L, "get_slice_bound_min", lua_get_slice_bound_min);
@@ -4403,6 +4507,14 @@ void initLua() {
   lua_register(L, "set_colorbar_visibility", lua_set_colorbar_visibility);
   lua_register(L, "get_colorbar_visibility", lua_get_colorbar_visibility);
   lua_register(L, "toggle_colorbar_visibility", lua_toggle_colorbar_visibility);
+
+  lua_register(L, "set_colorbar_visibility_horizontal", lua_set_colorbar_visibility_horizontal);
+  lua_register(L, "get_colorbar_visibility_horizontal", lua_get_colorbar_visibility_horizontal);
+  lua_register(L, "toggle_colorbar_visibility_horizontal", lua_toggle_colorbar_visibility_horizontal);
+
+  lua_register(L, "set_colorbar_visibility_vertical", lua_set_colorbar_visibility_vertical);
+  lua_register(L, "get_colorbar_visibility_vertical", lua_get_colorbar_visibility_vertical);
+  lua_register(L, "toggle_colorbar_visibility_vertical", lua_toggle_colorbar_visibility_vertical);
 
   // timebar
   lua_register(L, "set_timebar_visibility", lua_set_timebar_visibility);
@@ -4553,13 +4665,8 @@ void initLua() {
   lua_register(L, "set_heatoncolor", lua_set_heatoncolor);
   lua_register(L, "set_isocolors", lua_set_isocolors);
   lua_register(L, "set_colortable", lua_set_colortable);
-  lua_register(L, "set_light0", lua_set_light0);
-  lua_register(L, "set_light1", lua_set_light1);
   lua_register(L, "set_lightpos0", lua_set_lightpos0);
   lua_register(L, "set_lightpos1", lua_set_lightpos1);
-  lua_register(L, "set_lightmodellocalviewer", lua_set_lightmodellocalviewer);
-  lua_register(L, "set_lightmodelseparatespecularcolor",
-               lua_set_lightmodelseparatespecularcolor);
   lua_register(L, "set_sensorcolor", lua_set_sensorcolor);
   lua_register(L, "set_sensornormcolor", lua_set_sensornormcolor);
   lua_register(L, "set_bw", lua_set_bw);
@@ -4766,12 +4873,10 @@ void initLua() {
                lua_set_tourcolors_text);
   lua_register(L, "set_tourcolors_avatar",
                lua_set_tourcolors_avatar);
-  lua_register(L, "set_tourconstantvel", lua_set_tourconstantvel);
   lua_register(L, "set_viewalltours", lua_set_viewalltours);
   lua_register(L, "set_viewtimes", lua_set_viewtimes);
   lua_register(L, "set_viewtourfrompath", lua_set_viewtourfrompath);
   lua_register(L, "set_avatarevac", lua_set_avatarevac);
-  lua_register(L, "set_geometrytest", lua_set_geometrytest);
   lua_register(L, "set_devicevectordimensions",
                lua_set_devicevectordimensions);
   lua_register(L, "set_devicebounds", lua_set_devicebounds);
@@ -4847,7 +4952,7 @@ void initLua() {
   luaL_dostring(L, "require(\"smv\")");
   // luaL_loadfile(L, "smv.lua");
   // int luaL_1dofile (lua_State *L, const char *filename);
-
+  return L;
 }
 
 // int luaopen_smv(lua_State *L){

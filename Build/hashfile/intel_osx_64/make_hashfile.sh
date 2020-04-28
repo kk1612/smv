@@ -1,5 +1,3 @@
 #!/bin/bash
-source $IFORT_COMPILER/bin/compilervars.sh intel64
-
-rm -f *.o
+rm -f *.o hashfile_osx_64
 make -f ../Makefile intel_osx_64

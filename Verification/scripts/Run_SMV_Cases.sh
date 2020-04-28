@@ -4,22 +4,19 @@
 # Linux machine with a batch queuing system
 
 QUEUE=batch
-size=64
 DEBUG=
 OPENMP_OPTS=
 FDS_DEBUG=0
 nthreads=1
 RUN_SMV=1
-RUN_GEOM=1
 RUN_WUI=1
-JOBPREFIX=
-JOBPREF=
 STOPFDS=
-RUNOPTION=
 CFASTREPO=~/cfastgitclean
 COMPILER="intel"
 WAIT=0
-NOPT=
+INTEL=
+INTEL2=
+QFDS_COUNT=/tmp/qfds_count_`whoami`
 
 wait_cases_end()
 {
@@ -31,8 +28,8 @@ wait_cases_end()
         sleep 15
      done
    else
-     while [[ `qstat -a | awk '{print $2 $4}' | grep $(whoami) | grep $JOBPREF` != '' ]]; do
-        JOBS_REMAINING=`qstat -a | awk '{print $2 $4}' | grep $(whoami) | grep $JOBPREF | wc -l`
+     while [[ `qstat -a | awk '{print $2 $4 $10}' | grep $(whoami) | grep $JOBPREFIX | grep -v 'C$'` != '' ]]; do
+        JOBS_REMAINING=`qstat -a | awk '{print $2 $4 $10}' | grep $(whoami) | grep $JOBPREFIX | grep -v 'C$' | wc -l`
         echo "Waiting for ${JOBS_REMAINING} cases to complete." 
         sleep 15
      done
@@ -46,16 +43,13 @@ echo ""
 echo "Options"
 echo "-c - cfast repo directory"
 echo "-d - use debug version of FDS"
-echo "-g - run only geometry cases"
 echo "-h - display this message"
 echo "-I - compiler (intel or gnu)"
-echo "-j - job prefix"
+echo "-j p - specify a job prefix"
+echo "-J - use Intel MPI version of FDS"
 echo "-m max_iterations - stop FDS runs after a specifed number of iterations (delayed stop)"
 echo "     example: an option of 10 would cause FDS to stop after 10 iterations"
 echo "-o nthreads - run OpenMP version of FDS with a specified number of threads [default: $nthreads]"
-echo "-p size - platform size"
-echo "     default: 64"
-echo "     other options: 32"
 echo "-q queue - run cases using the queue named queue"
 echo "     default: batch"
 echo "     other options: vis"
@@ -82,15 +76,14 @@ is_file_installed()
 CURDIR=`pwd`
 cd ..
 
-export SVNROOT=`pwd`/../..
+SVNROOT=`pwd`/../..
 cd $SVNROOT
-export SVNROOT=`pwd`
+SVNROOT=`pwd`
 
 cd $CURDIR/..
 
-
 use_installed="0"
-while getopts 'c:dghI:j:m:No:p:q:rsuWwY' OPTION
+while getopts 'c:dhI:j:Jm:o:q:rsS:uWwY' OPTION
 do
 case $OPTION in
   c)
@@ -100,40 +93,31 @@ case $OPTION in
    DEBUG=_db
    FDS_DEBUG=1
    ;;
-  g)
-   RUN_SMV=0
-   RUN_GEOM=1
-   RUN_WUI=0
-   ;;
   h)
    usage;
    ;;
   I)
    COMPILER="$OPTARG"
    ;;
+  j)
+   JOBPREFIX="$OPTARG"
+   ;;
+  J)
+   INTEL=i
+   INTEL2="-I"
+   ;;
   m)
    export STOPFDSMAXITER="$OPTARG"
-   ;;
-  j)
-   JOBPREFIX="-j $OPTARG"
-   JOBPREF="$OPTARG"
-   ;;
-  N)
-   NOPT=-N
    ;;
   o)
    nthreads="$OPTARG"
    OPENMP_OPTS="-n $nthreads"
-   ;;
-  p)
-   size="$OPTARG"
    ;;
   q)
    QUEUE="$OPTARG"
    ;;
   r)
    RUN_SMV=1
-   RUN_GEOM=0
    ;;
   s)
    stop_cases=true
@@ -147,12 +131,10 @@ case $OPTION in
    ;;
   W)
    RUN_SMV=0
-   RUN_GEOM=0
    RUN_WUI=1
    ;;
   Y)
    RUN_SMV=1
-   RUN_GEOM=0
    RUN_WUI=1
 esac
 #shift
@@ -160,38 +142,36 @@ done
 
 export FDS_DEBUG
 
-size=_$size
+if [ "$JOBPREFIX" == "" ]; then
+  JOBPREFIX=SB_
+fi
 
 OS=`uname`
 if [ "$OS" == "Darwin" ]; then
-  PLATFORM=osx$size
+  PLATFORM=osx_64
 else
-  PLATFORM=linux$size
-fi
-IB=
-if [ "$FDSNETWORK" == "infiniband" ] ; then
-IB=ib
+  PLATFORM=linux_64
 fi
 
 if [ "$use_installed" == "1" ] ; then
   export WIND2FDS=wind2fds
-  export BACKGROUND=background
+  export BACKGROUND_PROG=background
 else
   export WIND2FDS=$SVNROOT/smv/Build/wind2fds/${COMPILER}_$PLATFORM/wind2fds_$PLATFORM
-  export BACKGROUND=$SVNROOT/smv/Build/background/${COMPILER}_$PLATFORM/background
+  export BACKGROUND_PROG=$SVNROOT/smv/Build/background/${COMPILER}_$PLATFORM/background_$PLATFORM
 fi
-export GEOM=$SVNROOT/smv/source/geomtest/${COMPILER}_$PLATFORM/geomtest
-export FDSEXE=$SVNROOT/fds/Build/mpi_${COMPILER}_$PLATFORM$IB$DEBUG/fds_mpi_${COMPILER}_$PLATFORM$IB$DEBUG
+export FDSEXE=$SVNROOT/fds/Build/${INTEL}mpi_${COMPILER}_$PLATFORM$DEBUG/fds_${INTEL}mpi_${COMPILER}_$PLATFORM$DEBUG
 export FDS=$FDSEXE
-export FDSMPI=$SVNROOT/fds/Build/mpi_${COMPILER}_$PLATFORM$IB$DEBUG/fds_mpi_${COMPILER}_$PLATFORM$IB$DEBUG
+export FDSMPI=$SVNROOT/fds/Build/${INTEL}mpi_${COMPILER}_$PLATFORM$DEBUG/fds_${INTEL}mpi_${COMPILER}_$PLATFORM$DEBUG
 export CFAST=$CFASTREPO/Build/CFAST/${COMPILER}_$PLATFORM/cfast7_$PLATFORM
-QFDSSH="$SVNROOT/fds/Utilities/Scripts/qfds.sh $RUNOPTION $NOPT"
+QFDSSH="$SVNROOT/smv/Utilities/Scripts/qfds.sh -j $JOBPREFIX"
 
 # Set queue to submit cases to
 
 if [ "$QUEUE" != "" ]; then
    if [ "$QUEUE" == "none" ]; then
-      is_file_installed $BACKGROUND
+      is_file_installed $BACKGROUND_PROG
+      echo 0 > $QFDS_COUNT
    fi
    QUEUE="-q $QUEUE"
 fi
@@ -203,18 +183,15 @@ if [[ ! $stop_cases ]] ; then
   echo "Removing FDS/CFAST output files"
   export RUNCFAST="$SVNROOT/smv/Verification/scripts/Remove_CFAST_Files.sh"
   export QFDS="$SVNROOT/fds/Verification/scripts/Remove_FDS_Files.sh"
-  export RUNTFDS="$SVNROOT/fds/Verification/scripts/Remove_FDS_Files.sh"
   scripts/SMV_Cases.sh
-  scripts/GEOM_Cases.sh
   scripts/WUI_Cases.sh
   echo "FDS/CFAST output files removed"
 fi
 
 # run cases    
 
-export  RUNCFAST="$QFDSSH -c -e $CFAST $QUEUE $STOPFDS $JOBPREFIX"
-export      QFDS="$QFDSSH -e $FDSEXE $OPENMPOPTS $QUEUE $STOPFDS $JOBPREFIX"
-export   RUNTFDS="$QFDSSH -e $FDSEXE $OPENMPOPTS $QUEUE $STOPFDS $JOBPREFIX"
+export  RUNCFAST="$QFDSSH $INTEL2 -e $CFAST $QUEUE $STOPFDS"
+export      QFDS="$QFDSSH $INTEL2 -e $FDSEXE $OPENMPOPTS $QUEUE $STOPFDS"
 
 echo "" | $FDSEXE 2> $SVNROOT/smv/Manuals/SMV_User_Guide/SCRIPT_FIGURES/fds.version
 
@@ -232,10 +209,6 @@ fi
 if [ "$RUN_SMV" == "1" ] ; then
   cd $SVNROOT/smv/Verification
   scripts/SMV_Cases.sh
-fi
-if [ "$RUN_GEOM" == "1" ] ; then
-  cd $SVNROOT/smv/Verification
-  scripts/GEOM_Cases.sh
 fi
 if [ "$RUN_WUI" == "1" ] ; then
   cd $SVNROOT/smv/Verification

@@ -1,16 +1,21 @@
 @echo off
 setlocal
 call ..\scripts\setopts %*
-title Building pthread library
+title Building windows pthread library
 erase *.o *.obj libpthread.a libpthreads.lib
 set target=libpthreads.lib
+set CFLAGS=-o2
 if %COMPILER% == gcc set target=libpthreads.a
+if %COMPILER% == gcc set CFLAGS=
 
 set OPT=
-if  "x%VS140COMNTOOLS%" == "x" goto endif2
+if  NOT "x%COMPILER%" == "xicl" goto endif2
   set OPT=-DHAVE_STRUCT_TIMESPEC
 :endif2
 
-make COMPILER=%COMPILER% SIZE=%SIZE% OPT=%OPT% RM=erase -f ./makefile %target%
+make CFLAGS=%CFLAGS% COMPILER=%COMPILER% SIZE=%SIZE% OPT=%OPT% RM=erase -f ./makefile %target%
 if %COPYLIB% == 1 copy %FROMLIB% %TOLIB%
+if "x%EXIT_SCRIPT%" == "x" goto skip1
+exit
+:skip1
 endlocal

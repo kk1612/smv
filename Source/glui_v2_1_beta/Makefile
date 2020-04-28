@@ -1,44 +1,56 @@
 .SUFFIXES: .c .cpp .o .obj
 
-SIZE=-m64
-
-PLATFORM=
-CFLAGOPT=
-
-GLUT_INC_LOCATION=../GLUTINC
-
-CFLAGS =-D pp_NOCLOSE
-
-RM=/bin/rm
 COMPILER=icc
 COMPILER2=icc
 CC=${COMPILER}
 CPP=${COMPILER2}
-CPPFLAGS=$(PLATFORM) ${CFLAGOPT} -fpermissive -I${GLUT_INC_LOCATION} -I ../GLUTINC/glut ${SIZE} 
-LPATH=${GLUTPATH} 
-INCS= 
+
+ifeq ($(GLUT),freeglut)
+  INCS = -I ../freeglut3.0.0/include
+  NOCLOSE=-D FREEGLUT_STATIC
+else
+  INCS = -I ../glui_gl
+  NOCLOSE=-D pp_NOCLOSE
+endif
 
 .c.obj:
-	$(CC) -c $(CFLAGS) $(CPPFLAGS) $(INCS) $(FILTERC) $<
+	$(CC)  $(CFLAGS) $(INCS) $(FILTERC) -c $<
 .c.o:
-	$(CC) -c $(CFLAGS) $(CPPFLAGS) $(INCS) $(FILTERC) $<
+	$(CC)  $(CFLAGS) $(INCS) $(FILTERC) -c $<
 .cpp.obj:
-	$(CPP) -c $(CFLAGS) $(CPPFLAGS) $(INCS) $(FILTERC) $<
+	$(CPP) $(CFLAGS) $(INCS) $(FILTERC) -c $<
 .cpp.o:
-	$(CPP) -c $(CFLAGS) $(CPPFLAGS) $(INCS) $(FILTERC) $<
+	$(CPP) $(CFLAGS) $(INCS) $(FILTERC) -c $<
 
 
-LIBGLUI= -Llib -lglui
-
-All: libglui.a 
-
-GLUI_OBJS = glui_add_controls.o glui.o glui_bitmap_img_data.o glui_bitmaps.o glui_button.o glui_edittext.o glui_checkbox.o glui_node.o glui_radio.o glui_statictext.o glui_panel.o glui_separator.o glui_spinner.o glui_control.o glui_column.o glui_translation.o glui_rotation.o glui_mouse_iaction.o glui_listbox.o glui_rollout.o arcball.o algebra3.o quaternion.o
+GLUI_OBJS = glui_add_controls.o glui.o glui_bitmap_img_data.o glui_bitmaps.o \
+            glui_button.o glui_edittext.o glui_checkbox.o glui_node.o \
+            glui_radio.o glui_statictext.o glui_panel.o glui_separator.o \
+            glui_spinner.o glui_control.o glui_column.o glui_translation.o \
+            glui_rotation.o glui_mouse_iaction.o glui_listbox.o glui_rollout.o\
+            arcball.o algebra3.o quaternion.o
 GLUI_OBJSWIN = $(GLUI_OBJS:.o=.obj)
 
-
-libglui.a: $(GLUI_OBJS)
-	@echo "Creating library"
+default: CFLAGS=-m64 $(PLATFORM) $(NOCLOSE) $(CFLAGOPT)
+default: $(GLUI_OBJS)
 	ar rcs libglui.a $(GLUI_OBJS)
 
-libglui.lib: $(GLUI_OBJSWIN)
+intel_linux_64: CFLAGS=-m64 $(NOCLOSE) -fpermissive 
+intel_linux_64: $(GLUI_OBJS)
+	ar rcs libglui.a $(GLUI_OBJS)
+
+intel_osx_64: CFLAGS=-m64 -D pp_OSX -stdlib=libc++ $(NOCLOSE) -fpermissive
+intel_osx_64: $(GLUI_OBJS)
+	ar rcs libglui.a $(GLUI_OBJS)
+
+gnu_osx_64: CFLAGS=-m64 -D pp_OSX $(NOCLOSE) -fpermissive 
+gnu_osx_64: $(GLUI_OBJS)
+	ar rcs libglui.a $(GLUI_OBJS)
+
+intel_win_64: CFLAGS= $(NOCLOSE) 
+intel_win_64 : $(GLUI_OBJSWIN)
 	lib $(GLUI_OBJSWIN) -OUT:libglui.lib 
+
+gnu_win_64: CFLAGS=$(NOCLOSE) -fpermissive -Wno-write-strings -Wno-int-to-pointer-cast 
+gnu_win_64: $(GLUI_OBJS)
+	ar rcs libglui.a $(GLUI_OBJS)

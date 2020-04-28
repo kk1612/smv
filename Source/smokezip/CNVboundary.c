@@ -6,14 +6,13 @@
 #include <math.h>
 #include <zlib.h>
 #include "svzip.h"
-#include "MALLOC.h"
+#include "MALLOCC.h"
 #include "compress.h"
 
 pdfdata pdfmerge,pdfframe;
 
 #define FORTREAD(var,size) FSEEK(BOUNDARYFILE,4,SEEK_CUR);\
                            returncode=fread(var,4,size,BOUNDARYFILE);\
-                           if(endianswitch==1)EndianSwitch(var,size);\
                            FSEEK(BOUNDARYFILE,4,SEEK_CUR)
 
 /* ------------------ clean_boundary ------------------------ */
@@ -355,7 +354,7 @@ int convert_boundary(patch *patchi, int *thread_index){
 
       //int compress (Bytef *dest,   uLongf *destLen, const Bytef *source, uLong sourceLen);
       ncompressed_zlib=ncompressed_zlibSAVE;
-      returncode=compress_zlib(compressed_boundarybuffer, &ncompressed_zlib, full_boundarybuffer, npatchfull);
+      returncode=CompressZLIB(compressed_boundarybuffer, &ncompressed_zlib, full_boundarybuffer, npatchfull);
       if(returncode!=0){
         fprintf(stderr,"*** Error: compress returncode=%i\n",returncode);
       }
@@ -406,12 +405,12 @@ wrapup:
     GetFileSizeLabel(sizeafter,after_label);
 #ifdef pp_THREAD
     patchi->compressed=1;
-    sprintf(patchi->summary,"compressed from %s to %s (%4.1f%s reduction)",before_label,after_label,(float)sizebefore/(float)sizeafter,GLOBx);
+    sprintf(patchi->summary,"%s -> %s (%4.1f%s)",before_label,after_label,(float)sizebefore/(float)sizeafter,GLOBx);
     threadinfo[*thread_index].stat=-1;
 #else
     PRINTF("  records=%i, ",count);
     PRINTF("Sizes: original=%s, ",before_label);
-    PRINTF("compressed=%s (%4.1f%s reduction)\n\n",after_label,(float)sizebefore/(float)sizeafter,GLOBx);
+    PRINTF("compressed=%s (%4.1f%s)\n\n",after_label,(float)sizebefore/(float)sizeafter,GLOBx);
 #endif
   }
 
@@ -538,10 +537,6 @@ void *compress_patches(void *arg){
 
 void update_patch_hist(void){
   int i;
-  int endiandata;
-
-  endiandata=GetEndian();
-  if(endianswitch==1)endiandata=1-endiandata;
 
   for(i=0;i<npatchinfo;i++){
     patch *patchi;
@@ -572,7 +567,6 @@ void update_patch_hist(void){
     pk2 = patchi->pk2;
 
     LOCK_COMPRESS;
-    FORTget_file_unit(&unit1,&patchi->unit_start);
     FORTopenboundary(patchi->file,&unit1,&patchi->version,&error1,lenfile);
     UNLOCK_COMPRESS;
 
@@ -584,9 +578,10 @@ void update_patch_hist(void){
     ResetHistogram(patchi->histogram,NULL,NULL);
     while(error1==0){
       int ndummy;
+      int file_size;
 
       FORTgetpatchdata(&unit1, &patchi->npatches,
-        pi1, pi2, pj1, pj2, pk1, pk2, &patchtime1, patchframe, &ndummy,&error1);
+        pi1, pi2, pj1, pj2, pk1, pk2, &patchtime1, patchframe, &ndummy,&file_size, &error1);
       UpdateHistogram(patchframe, NULL,patchframesize, patchi->histogram);
     }
     LOCK_COMPRESS;
@@ -600,14 +595,14 @@ void update_patch_hist(void){
 }
 
 #ifdef pp_THREAD
-/* ------------------ MT_update_slice_hist ------------------------ */
+/* ------------------ MT_update_patch_hist ------------------------ */
 
 void *MT_update_patch_hist(void *arg){
   update_patch_hist();
   return NULL;
 }
 
-/* ------------------ mt_update_slice_hist ------------------------ */
+/* ------------------ mt_update_patch_hist ------------------------ */
 
 void mt_update_patch_hist(void){
   pthread_t *thread_ids;
@@ -630,11 +625,6 @@ void mt_update_patch_hist(void){
 
 void Get_Boundary_Bounds(void){
   int i;
-
-  int endiandata;
-
-  endiandata=GetEndian();
-  if(endianswitch==1)endiandata=1-endiandata;
 
   PRINTF("Determining boundary file bounds\n");
   for(i=0;i<npatchinfo;i++){

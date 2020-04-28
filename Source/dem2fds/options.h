@@ -9,6 +9,8 @@
 
 //*** define dem2fds title
 
+#define pp_FASTCOLOR    // fast color computation
+
 #ifdef pp_BETA
 #define PROGVERSION "Test"
 #else
